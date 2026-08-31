@@ -129,14 +129,39 @@ fn mcp_initialize(id: serde_json::Value, request: &serde_json::Value) -> serde_j
     })
 }
 
-fn mcp_tools_list(id: serde_json::Value) -> serde_json::Value {
-    let tools: serde_json::Value =
-        serde_json::from_str(include_str!("mcp_tools.json")).expect("valid MCP tools catalog");
+/// Which tool families this server advertises.
+///
+/// One binary, two products: `market-search` ships the finance catalog,
+/// `legal-search` ships the legal one, and `--profile all` (or setting
+/// `ELI_MCP_PROFILE=all`) exposes both to a client that wants everything.
+/// Filtering happens at `tools/list` only — `tools/call` still dispatches any
+/// known tool, so a client that cached an older catalog keeps working.
+fn mcp_profile() -> String {
+    std::env::var("ELI_MCP_PROFILE")
+        .ok()
+        .map(|v| v.trim().to_ascii_lowercase())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "all".to_string())
+}
 
+fn mcp_catalog() -> Vec<serde_json::Value> {
+    let finance: Vec<serde_json::Value> =
+        serde_json::from_str(include_str!("mcp_tools.json")).expect("valid MCP tools catalog");
+    let legal: Vec<serde_json::Value> =
+        serde_json::from_str(include_str!("legal_tools.json")).expect("valid legal tools catalog");
+
+    match mcp_profile().as_str() {
+        "finance" | "market" | "markets" => finance,
+        "legal" | "law" => legal,
+        _ => finance.into_iter().chain(legal).collect(),
+    }
+}
+
+fn mcp_tools_list(id: serde_json::Value) -> serde_json::Value {
     json!({
         "jsonrpc": "2.0",
         "id": id,
-        "result": { "tools": tools }
+        "result": { "tools": mcp_catalog() }
     })
 }
 

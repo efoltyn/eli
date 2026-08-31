@@ -8,6 +8,7 @@ pub mod diff;
 pub mod executor;
 pub mod extraction;
 pub mod finance;
+pub mod legal;
 pub mod memory;
 pub mod meta;
 pub mod metrics;
