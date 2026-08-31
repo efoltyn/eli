@@ -22,6 +22,7 @@
 use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 
+pub mod colorado;
 pub mod massachusetts;
 pub mod opinions;
 pub mod wisconsin;
@@ -50,6 +51,13 @@ pub const COVERAGE: &[StateCoverage] = &[
         name: "Wisconsin",
         statutes: true,
         trial_records: true,
+        opinions: false,
+    },
+    StateCoverage {
+        code: "co",
+        name: "Colorado",
+        statutes: true,
+        trial_records: false,
         opinions: false,
     },
     StateCoverage {
@@ -165,6 +173,7 @@ pub async fn fetch_state_statute(req: StateStatuteRequest) -> Result<StateStatut
     match code.as_str() {
         "wi" => wisconsin::fetch_statute(req).await,
         "ma" => massachusetts::fetch_statute(req).await,
+        "co" => colorado::fetch_statute(req).await,
         _ => Err(unsupported(&code, "statute", |s| s.statutes)),
     }
 }
@@ -305,7 +314,11 @@ mod tests {
     fn dispatchers_match_the_coverage_table() {
         for s in COVERAGE {
             if s.statutes {
-                assert!(matches!(s.code, "wi" | "ma"), "statute arm missing for {}", s.code);
+                assert!(
+                    matches!(s.code, "wi" | "ma" | "co"),
+                    "statute arm missing for {}",
+                    s.code
+                );
             }
             if s.trial_records {
                 assert!(matches!(s.code, "wi"), "trial-record arm missing for {}", s.code);
