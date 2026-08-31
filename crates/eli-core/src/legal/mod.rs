@@ -32,6 +32,10 @@ pub(crate) mod shared_client {
         })
     }
 
+    /// Unlike the finance clients these honour the environment's proxy
+    /// settings (no `.no_proxy()`). Several of these hosts — federalregister.gov's
+    /// full-text endpoints among them — answer a proxied request and 302 a
+    /// direct one into an access wall.
     pub(crate) static GENERAL: LazyLock<reqwest::Client> = LazyLock::new(|| {
         reqwest::Client::builder()
             .user_agent(user_agent())
@@ -40,7 +44,6 @@ pub(crate) mod shared_client {
             .connect_timeout(std::time::Duration::from_secs(10))
             .pool_idle_timeout(std::time::Duration::from_secs(90))
             .pool_max_idle_per_host(4)
-            .no_proxy()
             .build()
             .expect("failed to build shared legal HTTP client")
     });
@@ -53,7 +56,6 @@ pub(crate) mod shared_client {
             .tcp_nodelay(true)
             .timeout(std::time::Duration::from_secs(180))
             .connect_timeout(std::time::Duration::from_secs(15))
-            .no_proxy()
             .build()
             .expect("failed to build bulk legal HTTP client")
     });
@@ -171,6 +173,7 @@ pub(crate) fn parse_date(input: &str, field: &str) -> Result<chrono::NaiveDate> 
 }
 
 pub mod caselaw;
+pub(crate) mod courtlistener;
 pub mod cfr;
 pub mod citator;
 pub mod comments;

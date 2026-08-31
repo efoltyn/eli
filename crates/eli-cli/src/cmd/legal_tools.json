@@ -1,1 +1,149 @@
-[]
+[
+  {
+    "name": "legal_cite",
+    "description": "VERIFY CITATIONS BEFORE YOU RELY ON THEM. Resolves a reporter citation against CourtListener's index of ~10M opinions and tells you whether the case exists and what it actually is. This is the antidote to the signature failure mode of AI legal work: a citation that looks perfectly well-formed and is not real, or is real but stands for a different case than the one named. A web search cannot do this — search engines index what exists and have no representation of 'this reporter page is empty', so absence of results conflates fabricated / unpublished / not-digitized / not-indexed. This tool distinguishes them. Pass `text` with a whole paragraph, brief section, or draft memo and EVERY citation in it is extracted and checked in one call — that is the intended use. Pass `cite` for a single citation. Each verdict returns exists (bool), the real case_name, court, date, and a link. IMPORTANT: a not-found verdict is strong evidence of fabrication but not proof — unpublished and un-digitized opinions exist, and the `note` field says so; report it that way rather than flatly declaring a case fake. Also walks the citation network: `cited_by` gives you what has cited this opinion since (the free equivalent of a Shepard's/KeyCite pull for checking whether authority is still good), `authorities` gives you what it relied on. Works with no API key; setting COURTLISTENER_TOKEN (free) raises rate limits and enables the authoritative parallel-citation lookup.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "text": { "type": "string", "description": "Free text to scan — a paragraph, a brief, a draft memo, an opposing party's filing. Every citation-shaped string found is extracted, deduped and verified. This is the highest-value way to call this tool." },
+        "cite": { "type": "string", "description": "A single citation to verify, e.g. \"597 U.S. 1\", \"612 F.3d 1099\", \"410 U.S. 113\". Parenthetical court/year and pincites are tolerated and ignored." },
+        "id": { "type": "integer", "description": "CourtListener opinion id, when you already have one and want the citation network rather than a verification." },
+        "cited_by": { "type": "boolean", "description": "Also return the cases that cite this one — use this to check whether a case is still good law before relying on it." },
+        "authorities": { "type": "boolean", "description": "Also return the cases this opinion cites." },
+        "limit": { "type": "integer", "description": "Max network results (default 25)." }
+      }
+    }
+  },
+  {
+    "name": "legal_cfr",
+    "description": "The Code of Federal Regulations INCLUDING ITS HISTORY — regulation text exactly as it read on any date back to 2016-12-31, the full amendment log for a part, and a diff between two dates. Point-in-time is the whole point: compliance, enforcement and securities questions turn on the rule in force at the time of the conduct, and a search engine only has today's text. Ask the web what 17 CFR 240.10b5-1 said in June 2021 and you get the December 2022 rewrite, silently and with no indication that anything changed. Four modes. (1) TEXT: `title` + `section` (or `part`) + optional `date` returns the operative text as of that date — cite it directly, it is the real regulatory language, not a summary. (2) HISTORY: `history=true` returns every amendment to a part with its effective date and eCFR's own substantive-vs-editorial flag, which answers \"when did this last change, and did the change matter\" exactly rather than approximately. (3) DIFF: set `date` and `diff_date` to get the added and removed language between two points in time — this is how you see what an amendment actually did to the operative text. (4) SEARCH: `q` full-text searches the CFR, optionally scoped by title/part. Always pass `section` when you have it: fetching a whole title is ~16MB of XML while one section is ~1KB. No API key needed.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "title": { "type": "integer", "description": "CFR title number 1-50 (17 = securities, 12 = banking, 26 = tax, 29 = labor, 40 = environment, 45 = health)." },
+        "part": { "type": "string", "description": "Part, e.g. \"240\". Derived automatically when you pass a section." },
+        "section": { "type": "string", "description": "Section, e.g. \"240.10b5-1\" or \"1026.19\". Strongly preferred — a section is ~1KB against ~16MB for a whole title." },
+        "subpart": { "type": "string", "description": "Subpart filter, e.g. \"A\"." },
+        "date": { "type": "string", "description": "YYYY-MM-DD. Returns the text in force on that date. Coverage starts 2016-12-31; earlier dates warn and point at the GPO annual editions (1996-present). Omit for current text." },
+        "diff_date": { "type": "string", "description": "YYYY-MM-DD. When set, diffs the citation between `date` and this date and returns the added/removed language." },
+        "q": { "type": "string", "description": "Full-text search across the CFR instead of fetching a citation." },
+        "history": { "type": "boolean", "description": "Return every amendment date for the part, newest first, with a substantive/editorial flag — instead of text." },
+        "structure": { "type": "boolean", "description": "Return the hierarchy/table of contents instead of text." },
+        "max_chars": { "type": "integer", "description": "Cap on returned text (default 80000)." }
+      }
+    }
+  },
+  {
+    "name": "legal_fedreg",
+    "description": "The Federal Register — every rule, proposed rule, notice and presidential document since 1994, with the metadata as STRUCTURED FIELDS rather than prose to be re-read out of a PDF: comment deadline, effective date, RIN, regulations.gov docket id, and the exact CFR parts the document amends. Three things here are hard to get any other way. (1) PUBLIC INSPECTION (`inspection=true`): documents filed and legally effective on filing but not published until tomorrow — nothing has indexed them yet, by construction, so this is the only way to see them today. (2) FACET COUNTS (`facet=monthly|daily|weekly|quarterly|yearly|agency|type|topic`): exact counts over the whole corpus for a query, which is a computation over 60k+ documents rather than a page anyone has published — use it to measure how much an agency has actually written about a topic over time. (3) PRECISE FILTERING: combine `q` + `agency` + `kind` + date range + `cfr_title`/`cfr_part` + `docket` to isolate a rulemaking, then pull the exact text. Set `text=true` to get the full document body (use a small `limit` — these run to hundreds of KB each). Use `doc` with a document number for one specific document, which returns its text by default. Note the search `total_available` saturates at 10000; use `facet` when you need an exact count. No API key needed.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "q": { "type": "string", "description": "Full-text query across document titles, abstracts and bodies." },
+        "kind": { "type": "string", "description": "rule (final rules) | proposed (NPRMs) | notice | presidential (EOs, proclamations)." },
+        "agency": { "type": "string", "description": "Agency slug, comma-separated, e.g. securities-and-exchange-commission, environmental-protection-agency, consumer-financial-protection-bureau." },
+        "after": { "type": "string", "description": "Published on or after, YYYY-MM-DD." },
+        "before": { "type": "string", "description": "Published on or before, YYYY-MM-DD." },
+        "docket": { "type": "string", "description": "Regulations.gov docket id filter, e.g. \"SEC-2026-5190\" — use this to pull the whole paper trail of one rulemaking." },
+        "cfr_title": { "type": "integer", "description": "Only documents amending this CFR title." },
+        "cfr_part": { "type": "string", "description": "Only documents amending this CFR part — the way to find every rulemaking that has touched a regulation you care about." },
+        "doc": { "type": "string", "description": "Fetch one document by its Federal Register document number, e.g. \"2026-17183\". Returns full text by default." },
+        "text": { "type": "boolean", "description": "Fetch the full plain text of every result. Expensive — pair with a small limit." },
+        "inspection": { "type": "boolean", "description": "Return the public-inspection queue: filed, legally effective, not yet published. Tomorrow's Federal Register, today." },
+        "facet": { "type": "string", "description": "Return exact counts instead of documents: daily, weekly, monthly, quarterly, yearly, agency, type, topic, section. The only way to get a true count — search results cap at 10000." },
+        "max_chars": { "type": "integer", "description": "Cap on each document's text (default 40000)." },
+        "limit": { "type": "integer", "description": "Max results (default 20, max 100)." }
+      }
+    }
+  },
+  {
+    "name": "legal_search",
+    "description": "Full-text search across ~10M federal and state court opinions, with filters a search engine does not expose: specific court (`court=ca9` or `nysd`), date range, judge, precedential status, and a minimum citation count as a crude significance filter. Supports boolean AND/OR/NOT, \"exact phrases\", and proximity operators — so you can ask for opinions using one phrase near another, which no general web search will do. `kind` selects the corpus: o = opinions (default), r = RECAP federal court filings (briefs, motions, orders — documents that exist nowhere on the open web), d = dockets, oa = oral arguments, p = judges. Returns case name, citation, court, date, judge, citation count and a highlighted snippet per hit, plus `total_available` for the true match count. Reach for this instead of a web search whenever the question is about what courts have actually held, rather than what commentators have written about it — search engines rank secondary commentary above primary sources, and the paywalled databases (Westlaw, Lexis, Bloomberg Law) are where the primary material usually sits. Works without an API key at low volume; set COURTLISTENER_TOKEN (free) for real rate limits.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "q": { "type": "string", "description": "Query. Supports AND/OR/NOT, \"exact phrases\", and proximity. Required." },
+        "kind": { "type": "string", "description": "o = opinions (default), r = RECAP filings, d = dockets, oa = oral arguments, p = judges." },
+        "court": { "type": "string", "description": "Court id, comma-separated: scotus, ca1-ca11, cadc, cafc, and district courts like nysd, cacd, txnd. State courts use their own ids." },
+        "after": { "type": "string", "description": "Filed on or after, YYYY-MM-DD." },
+        "before": { "type": "string", "description": "Filed on or before, YYYY-MM-DD." },
+        "judge": { "type": "string", "description": "Judge name filter." },
+        "cited_gt": { "type": "integer", "description": "Only opinions cited more than N times — a fast way to cut to the cases that mattered." },
+        "status": { "type": "string", "description": "Precedential status, e.g. Published, Unpublished." },
+        "order": { "type": "string", "description": "score desc (default), dateFiled desc, dateFiled asc, citeCount desc." },
+        "limit": { "type": "integer", "description": "Max results (default 20)." }
+      }
+    }
+  },
+  {
+    "name": "legal_docket",
+    "description": "Federal docket sheets: the parties, the assigned judge, the cause and nature of suit, and the numbered entries with their filing dates and document descriptions. This is the tool for \"what has actually happened in this case\", and it is the clearest example of something the open web cannot answer — docket sheets sit behind PACER's per-page fee and behind commercial paywalls (Docket Alarm, Bloomberg Law), so a web search returns news coverage about a case rather than the record of it. Where a document has been contributed to RECAP it comes back with a free PDF link. Address a case three ways: `court` + `number` (e.g. court=nysd, number=\"1:22-cr-00673\"), `id` when you already have a CourtListener docket id, or `q` to search by case name — which returns candidates rather than guessing which case you meant. Supreme Court dockets are served from a separate key-free source and need no credentials at all. `entry_count` is the true total upstream, so you can page a thousand-entry docket with `limit` and `offset` and know what you are paging through. Federal district and appellate coverage depends on RECAP contributions and is not complete — the response says what it could and could not reach rather than implying an empty docket. COURTLISTENER_TOKEN (free) substantially improves coverage here.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "court": { "type": "string", "description": "Court id, e.g. nysd, cacd, ca9, scotus." },
+        "number": { "type": "string", "description": "Docket number as filed, e.g. \"1:22-cr-00673\" or \"22-451\" for the Supreme Court." },
+        "id": { "type": "integer", "description": "CourtListener docket id — skips resolution." },
+        "q": { "type": "string", "description": "Search by case name instead of an exact number. Returns candidates to choose from." },
+        "entries": { "type": "boolean", "description": "Include the docket entries (default true). Set false for just the case metadata." },
+        "limit": { "type": "integer", "description": "Max entries to return (default 50)." },
+        "offset": { "type": "integer", "description": "Start at this entry — for paging long dockets." }
+      }
+    }
+  },
+  {
+    "name": "legal_opinion",
+    "description": "The full text of a single court opinion, by CourtListener opinion `id` or by reporter `cite` (e.g. \"597 U.S. 1\"). Use this after legal_search or legal_cite has identified the case you want. Returns the opinion body along with the case name, court, date, authoring judge, precedential status, parallel citations, and how many times it has been cited. The reason to use this rather than fetching a web page: you get the complete opinion text as a payload you can quote and pincite from, not a summarizer's description of it — and summarization is where legally load-bearing clauses quietly disappear. The response says which source the text came from, so you always know whether you are reading the authoritative record or a scraped page.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "integer", "description": "CourtListener opinion id." },
+        "cite": { "type": "string", "description": "Reporter citation, e.g. \"597 U.S. 1\". Resolved key-free." },
+        "max_chars": { "type": "integer", "description": "Cap on returned text (default 60000). Long opinions are truncated with a flag, not silently cut." }
+      }
+    }
+  },
+  {
+    "name": "legal_comments",
+    "description": "The rulemaking record on regulations.gov: dockets, the documents in them, and the INDIVIDUAL PUBLIC COMMENTS with their text, submitter, organization and tracking number. Comments are the part of the administrative record that search engines do not meaningfully index — they live behind a JS app, most substantive ones are PDF attachments, and the site blocks crawlers — so \"what did industry actually tell the agency about this rule\" is close to unanswerable from the open web, while being exactly what predicts where a final rule lands and what an APA challenge will argue. regulations.gov requires a free api.data.gov key (signup at https://api.data.gov/signup/, then set REGULATIONS_GOV_API_KEY); without one this tool degrades to the key-free Federal Register view of the same docket and tells you plainly what the key would add, rather than returning nothing. Set `text=true` to pull the full body of each comment — the list view truncates.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "docket": { "type": "string", "description": "Regulations.gov docket id, e.g. \"SEC-2026-5190\" or \"FINCEN-2024-0006\". Get one from legal_fedreg's docket_ids." },
+        "q": { "type": "string", "description": "Full-text query across comments." },
+        "agency": { "type": "string", "description": "Agency id filter, e.g. SEC, EPA, CFPB, FINCEN." },
+        "after": { "type": "string", "description": "Posted on or after, YYYY-MM-DD." },
+        "id": { "type": "string", "description": "Fetch one comment by id and get its full text." },
+        "text": { "type": "boolean", "description": "Fetch full comment bodies rather than metadata only." },
+        "limit": { "type": "integer", "description": "Max results (default 25, max 250)." }
+      }
+    }
+  },
+  {
+    "name": "legal_enforcement",
+    "description": "Agency enforcement activity in one call: SEC litigation releases and administrative proceedings, DOJ press releases (271k+ records, searchable by title substring), and the CFPB consumer complaint database. Use it to answer \"has this agency acted on this conduct, and how recently\" — the pattern-level question that a web search answers with news articles rather than with the agency's own record. `source` is sec, cfpb, doj, or all; sources are fetched concurrently and a failure in one is reported as a warning rather than failing the call. Two honesty notes the tool carries in its own output: SEC hosts refuse requests whose User-Agent lacks a contact email (set SEC_USER_AGENT), and the CFPB records are consumer COMPLAINTS, not enforcement actions — they measure what consumers reported, not what the agency did.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "source": { "type": "string", "description": "sec | cfpb | doj | all (default all)." },
+        "q": { "type": "string", "description": "Keyword filter." },
+        "after": { "type": "string", "description": "On or after, YYYY-MM-DD." },
+        "limit": { "type": "integer", "description": "Max results per source (default 20)." }
+      }
+    }
+  },
+  {
+    "name": "legal_statute",
+    "description": "Statutory text: a US Code section by title and section (e.g. title 15 section 78j — Securities Exchange Act §10), or a bill by id and Congress. Resolved through GPO's govinfo link service and GovTrack, both key-free. Returns the operative statutory language as text you can quote, with its heading, citation and source URL. The failure mode this guards against is specific and real: govinfo answers some bad citations with HTTP 200 and an HTML error page, which a naive fetch would hand back as if it were the statute — this tool detects that and warns instead. Use it whenever an argument turns on what a statute actually says rather than what it is generally understood to say.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "title": { "type": "integer", "description": "US Code title, e.g. 15 (securities/commerce), 17 (copyright), 26 (tax), 42 (public health/civil rights)." },
+        "section": { "type": "string", "description": "Section within the title, e.g. \"78j\", \"107\", \"1983\"." },
+        "bill": { "type": "string", "description": "Bill id, e.g. \"hr3076\", \"s1234\"." },
+        "congress": { "type": "integer", "description": "Congress number for a bill lookup, e.g. 117. Defaults to the current Congress." },
+        "max_chars": { "type": "integer", "description": "Cap on returned text (default 60000)." }
+      }
+    }
+  }
+]

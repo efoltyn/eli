@@ -16,9 +16,10 @@ use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 
 const ECFR_BASE: &str = "https://www.ecfr.gov/api";
-/// eCFR's own corpus starts here; asking for anything earlier 404s with a
-/// confusing message, so we say it plainly instead.
-const ECFR_EARLIEST: &str = "2017-01-01";
+/// Measured floor: 2016-12-31 answers, 2016-12-30 404s — and it 404s with the
+/// same message as a bad section number, so we range-check here rather than
+/// letting the caller misread "no such date" as "no such regulation".
+const ECFR_EARLIEST: &str = "2016-12-31";
 
 #[derive(Clone, Debug)]
 pub struct CfrRequest {
@@ -162,7 +163,7 @@ fn resolve_date(date: Option<&str>, warnings: &mut Vec<String>) -> Result<String
     if parsed < earliest {
         warnings.push(format!(
             "eCFR coverage starts {ECFR_EARLIEST}; {d} predates it. For older text use the annual \
-             GPO CFR editions (govinfo collection CFR, 1996-present)."
+             GPO annual CFR editions on govinfo, which go back to 1996."
         ));
     }
     let today = Utc::now().date_naive();
