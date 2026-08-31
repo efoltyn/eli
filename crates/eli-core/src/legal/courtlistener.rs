@@ -130,21 +130,21 @@ pub(crate) fn parse_cite(input: &str) -> Option<ParsedCite> {
     if rest.len() < 2 {
         return None;
     }
-    // The page is the FIRST digit-leading token after the reporter. Taking the
-    // last one instead reads the pincite in "597 U.S. 1, 24" as the page, which
-    // resolves to a different case — a silent wrong answer, the one failure
-    // mode this whole tool exists to prevent. Reporter abbreviations that
-    // contain digits ("F.3d", "N.Y.2d") still start with a letter, so they
-    // never match here.
-    let page_idx = rest
-        .iter()
-        .position(|t| t.chars().next().is_some_and(|c| c.is_ascii_digit()))?;
+    // The page is the first ALL-DIGIT token after the reporter.
+    //
+    // Two traps, both of which resolve to the wrong case rather than failing
+    // loudly. Taking the *last* digit-leading token reads the pincite in
+    // "597 U.S. 1, 24" as the page. Taking the first digit-*leading* token reads
+    // the series marker in "139 Ohio St. 3d 12" as page 3 — there the series is
+    // its own token, unlike the joined "F.3d". Requiring every character to be a
+    // digit rules both out: "3d" fails, "12" wins.
+    let page_idx = rest.iter().position(|t| is_page_token(t))?;
     if page_idx == 0 {
         return None;
     }
     let page: String = rest[page_idx]
         .chars()
-        .take_while(|c| c.is_ascii_digit())
+        .filter(|c| c.is_ascii_digit())
         .collect();
     if page.is_empty() {
         return None;
@@ -160,14 +160,33 @@ pub(crate) fn parse_cite(input: &str) -> Option<ParsedCite> {
     })
 }
 
-/// CourtListener's `/c/` resolver wants the reporter lowercased with the
-/// punctuation stripped: "F.3d" -> "f3d", "U.S." -> "us", "S. Ct." -> "sct".
+/// Is this token a page number? Digits only, once trailing pincite punctuation
+/// ("1,") is removed. "3d" and "4th" are reporter series markers, not pages.
+fn is_page_token(token: &str) -> bool {
+    let trimmed = token.trim_end_matches(|c: char| !c.is_ascii_alphanumeric());
+    !trimmed.is_empty() && trimmed.chars().all(|c| c.is_ascii_digit())
+}
+
+/// Slugify a reporter for the `/c/` resolver.
+///
+/// The rule is not "strip all punctuation": internal punctuation goes, but a
+/// SPACE becomes a hyphen. "Ohio St. 3d" is `ohio-st-3d`, and the stripped-
+/// together `ohiost3d` 404s — which the citator then reported as a nonexistent
+/// case. Getting this wrong makes the tool call real decisions fake, which is
+/// worse than any other bug it could have.
 pub(crate) fn slug_reporter(reporter: &str) -> String {
     reporter
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric())
-        .collect::<String>()
-        .to_ascii_lowercase()
+        .split_whitespace()
+        .map(|token| {
+            token
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric())
+                .collect::<String>()
+                .to_ascii_lowercase()
+        })
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>()
+        .join("-")
 }
 
 /// The key-free citation resolver: `/c/<reporter>/<volume>/<page>/`.
@@ -302,6 +321,23 @@ mod tests {
                 page: "1".into()
             })
         );
+        // The series marker is its own token here — "3d" must not become page 3.
+        assert_eq!(
+            parse_cite("139 Ohio St. 3d 12"),
+            Some(ParsedCite {
+                volume: "139".into(),
+                reporter: "Ohio St. 3d".into(),
+                page: "12".into()
+            })
+        );
+        assert_eq!(
+            parse_cite("50 Cal. 4th 1"),
+            Some(ParsedCite {
+                volume: "50".into(),
+                reporter: "Cal. 4th".into(),
+                page: "1".into()
+            })
+        );
         assert_eq!(
             parse_cite("410 U. S. 113"),
             Some(ParsedCite {
@@ -321,9 +357,19 @@ mod tests {
 
     #[test]
     fn slugs_reporters_for_the_resolver() {
+        // Single-token reporters: punctuation just disappears.
         assert_eq!(slug_reporter("F.3d"), "f3d");
         assert_eq!(slug_reporter("U.S."), "us");
-        assert_eq!(slug_reporter("S. Ct."), "sct");
+        assert_eq!(slug_reporter("N.J."), "nj");
+        assert_eq!(slug_reporter("N.Y.2d"), "ny2d");
+        // Multi-token reporters hyphenate. Verified live against the resolver:
+        // /c/ohio-st-3d/139/12/ redirects to State v. Maxwell, /c/ohiost3d/ 404s.
+        assert_eq!(slug_reporter("Ohio St. 3d"), "ohio-st-3d");
+        assert_eq!(slug_reporter("S. Ct."), "s-ct");
+        assert_eq!(slug_reporter("Cal. 4th"), "cal-4th");
+        assert_eq!(slug_reporter("So. 3d"), "so-3d");
+        // Repeated whitespace must not produce an empty segment.
+        assert_eq!(slug_reporter("Ohio  St.   3d"), "ohio-st-3d");
     }
 
     #[test]
