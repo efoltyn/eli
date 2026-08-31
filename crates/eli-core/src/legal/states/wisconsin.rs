@@ -188,7 +188,7 @@ pub(super) async fn fetch_statute(req: StateStatuteRequest) -> Result<StateStatu
         warnings: Vec::new(),
     };
 
-    let Some(html) = get_text(&url, "wisconsin statutes", &mut warnings).await else {
+    let Some(html) = get_statute_page(&url, &section, &mut warnings).await else {
         out.warnings = warnings;
         return Ok(out);
     };
@@ -200,13 +200,7 @@ pub(super) async fn fetch_statute(req: StateStatuteRequest) -> Result<StateStatu
     // presence of the section's own blocks proves we got what was asked for.
     let blocks = section_blocks(&html, &section);
     if blocks.is_empty() {
-        warnings.push(format!(
-            "Wis. Stat. § {section} is not in the current statutes: the page served carries no \
-             text for that section. Either the number is wrong or the section has been repealed \
-             out of the code entirely (Wisconsin removes repealed sections rather than leaving a \
-             stub). Check the chapter's table of contents at {STATUTE_BASE}/{}.",
-            urlencoding::encode(chapter_of(&section).as_deref().unwrap_or(&section))
-        ));
+        warnings.push(not_in_the_code(&section));
         out.warnings = warnings;
         return Ok(out);
     }
@@ -497,22 +491,46 @@ fn to_record(c: WccaCase, include_dob: bool) -> StateCaseRecord {
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
-async fn get_text(url: &str, source: &str, warnings: &mut Vec<String>) -> Option<String> {
+/// Fetch a statute page, turning the two ways this host says "no such
+/// section" into the same readable warning.
+///
+/// A missing section 404s with a ~12 KB page of site chrome. Left to
+/// `soft_fail` that becomes a warning containing 240 characters of raw
+/// `<!DOCTYPE html>`, which tells a reader nothing — so the 404 is caught
+/// here and every other status still goes through the shared handler.
+async fn get_statute_page(url: &str, section: &str, warnings: &mut Vec<String>) -> Option<String> {
     let resp = match shared_client::GENERAL.get(url).send().await {
         Ok(r) => r,
         Err(e) => {
-            warnings.push(format!("{source} request failed: {e}"));
+            warnings.push(format!("wisconsin statutes request failed: {e}"));
             return None;
         }
     };
-    let resp = soft_fail(source, resp, warnings).await?;
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        warnings.push(not_in_the_code(section));
+        return None;
+    }
+    let resp = soft_fail("wisconsin statutes", resp, warnings).await?;
     match resp.text().await {
         Ok(t) => Some(t),
         Err(e) => {
-            warnings.push(format!("{source} body read failed: {e}"));
+            warnings.push(format!("wisconsin statutes body read failed: {e}"));
             None
         }
     }
+}
+
+/// Wisconsin deletes repealed sections from the code rather than leaving a
+/// stub, so "not found" and "repealed a decade ago" are indistinguishable from
+/// outside — say both rather than pick one.
+fn not_in_the_code(section: &str) -> String {
+    format!(
+        "Wis. Stat. § {section} is not in the current statutes. Either the number is wrong, or \
+         the section was repealed — Wisconsin removes repealed sections from the code rather \
+         than leaving a stub, so the two look identical from here. Check the chapter's contents \
+         at {STATUTE_BASE}/{}.",
+        urlencoding::encode(chapter_of(section).as_deref().unwrap_or(section))
+    )
 }
 
 /// POST one WCCA search and return its rows. Every failure mode degrades into

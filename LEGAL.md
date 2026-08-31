@@ -38,6 +38,64 @@ structurally cannot. Not "answers it better" — cannot.
 | `legal_opinion` | The complete opinion as a payload you can pincite, not a summarizer's description of one. |
 | `legal_enforcement` | The agencies' own records, rather than reporting about them. |
 
+## State law
+
+The federal tools are national; state coverage is deliberately narrow, and each
+row was verified against the live source. `legal_statute --state`,
+`legal_state_record` and `legal_state_opinions` say which states they cover and
+name them in the error when you ask for one they don't.
+
+| State | Statutes | Trial-court records | Unpublished opinions |
+|---|---|---|---|
+| Wisconsin | ✅ `docs.legis.wisconsin.gov` | ✅ **WCCA — the only one** | — |
+| Massachusetts | ✅ JSON API, cleanest of the 20 states probed | — | — |
+| Illinois | — | — | ✅ Rule 23 orders |
+| Pennsylvania | — | — | ✅ Superior memoranda |
+| Michigan | — | — | ✅ unpublished per curiams |
+| New Jersey | — | — | ✅ unpublished appellate |
+
+**Wisconsin is the only state where the loop closes end to end**: find the
+traffic case, read the statute charged, pull the appellate law, verify the
+citations. Every other state is missing the trial-court leg, which is where a
+traffic ticket, a small-claims suit or a misdemeanor actually lives.
+
+Why it's per-state and not a 50-state sweep, all measured rather than assumed:
+
+- **No all-50-state statute source exists.** Open States and LegiScan carry
+  bills, not codified code. Justia has the text but 403s a real client.
+  OpenLaws is gated commercial.
+- **No centralized traffic penalty or points data anywhere.** NHTSA's speed-law
+  digest is a 2013 PDF; IIHS and GHSA publish HTML tables of speed limits only.
+- **No shared court platform.** Michigan's API route, tested against nine other
+  state judiciaries, 404s or 403s on every one. Tyler Odyssey covers many
+  states' dockets but exposes nothing to adapt.
+- **Trial records are walled almost everywhere.** Maryland's famously open case
+  search sits behind a DataDome captcha and 403s every programmatic request.
+
+### Handling of personal data
+
+Trial-court records name private individuals. `legal_state_record` withholds
+dates of birth unless you pass `include_dob`, and never emits one that the
+source marks sealed. The per-case detail view behind Wisconsin's index is
+captcha-gated; this tool does not attempt it and says so in `warnings`.
+
+### State-source traps worth knowing
+
+- **`statutes.capitol.texas.gov` is now an Angular shell that returns an
+  identical 250,874-byte page for every path** — the real statute, `robots.txt`,
+  and a nonsense URL all produce the same md5. A scraper against it returns
+  200 OK forever while getting nothing. Verify by content, never by status code.
+- **Massachusetts spells `/` inside a section code as `~`** (`7D1~2`, not
+  `7D1/2`); `%2F` is rejected by IIS before the API sees it. A miss returns
+  **400**, not 404, and a repealed section returns `Text: ""` with the repeal
+  note in the heading — so an empty string must never be surfaced as law.
+- **New Jersey's `filter[status]=1` is mandatory**, and omitting it does not
+  fail loudly — it returns silently short pages. The sort field is
+  `field_posted_date`, and `page[limit]` caps at 50.
+- **Opinion feeds are a rolling window** of roughly the last 50-100 decisions
+  per court. They are a watcher, not an archive: an empty result means "not
+  recent", never "no such case". Use `legal_search` for the historical corpus.
+
 ## API keys
 
 Everything works with no key at all. Two upgrades are worth taking:
