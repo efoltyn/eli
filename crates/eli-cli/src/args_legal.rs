@@ -20,8 +20,65 @@ enum LegalCommand {
     Comments(LegalCommentsArgs),
     /// Agency enforcement actions (SEC, CFPB, DOJ).
     Enforcement(LegalEnforcementArgs),
-    /// US Code sections and bill text via govinfo.
+    /// US Code sections and bill text via govinfo, or a state code with --state.
     Statute(LegalStatuteArgs),
+    /// State trial-court case records — where traffic and small-claims cases actually live.
+    Record(LegalRecordArgs),
+    /// State appellate opinions from the state's own feed, including unpublished ones.
+    Opinions(LegalOpinionsArgs),
+}
+
+#[derive(clap::Args, Debug)]
+pub struct LegalRecordArgs {
+    /// State code, e.g. wi. Only states with an open trial-court source are covered.
+    #[arg(long)]
+    pub state: String,
+    /// County name, e.g. Milwaukee. Required for a date-range search.
+    #[arg(long)]
+    pub county: Option<String>,
+    /// Case-type code: TR (traffic), SC (small claims), CV (civil), CM (criminal misdemeanor).
+    #[arg(long)]
+    pub case_type: Option<String>,
+    /// Exact case number, e.g. "2024TR000321".
+    #[arg(long)]
+    pub case_no: Option<String>,
+    /// Filed on or after (YYYY-MM-DD).
+    #[arg(long)]
+    pub after: Option<String>,
+    /// Filed on or before (YYYY-MM-DD).
+    #[arg(long)]
+    pub before: Option<String>,
+    /// Include dates of birth. Off by default: these are records about private
+    /// individuals, and a DOB is almost never needed to answer the question.
+    #[arg(long, default_value_t = false)]
+    pub include_dob: bool,
+    /// Max records (default 50).
+    #[arg(long, default_value = "50")]
+    pub limit: usize,
+    #[arg(long, default_value = "json")]
+    pub format: String,
+    #[arg(long)]
+    pub out: Option<PathBuf>,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct LegalOpinionsArgs {
+    /// State code: il, pa, mi, nj.
+    #[arg(long)]
+    pub state: String,
+    /// Keyword filter.
+    #[arg(long)]
+    pub q: Option<String>,
+    /// Only non-precedential dispositions — the ones a Published-only search hides.
+    #[arg(long, default_value_t = false)]
+    pub unpublished: bool,
+    /// Max results (default 50).
+    #[arg(long, default_value = "50")]
+    pub limit: usize,
+    #[arg(long, default_value = "json")]
+    pub format: String,
+    #[arg(long)]
+    pub out: Option<PathBuf>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -274,6 +331,12 @@ pub struct LegalEnforcementArgs {
 
 #[derive(clap::Args, Debug)]
 pub struct LegalStatuteArgs {
+    /// State code (e.g. wi, ma). Switches from the US Code to that state's code.
+    #[arg(long)]
+    pub state: Option<String>,
+    /// Chapter, for states that address law as chapter + section (e.g. MA ch. 90).
+    #[arg(long)]
+    pub chapter: Option<String>,
     /// US Code title, e.g. 15.
     #[arg(long)]
     pub title: Option<u32>,

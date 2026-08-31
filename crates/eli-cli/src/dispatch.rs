@@ -86,5 +86,7 @@ async fn cmd_legal(cmd: LegalCommand) -> Result<()> {
         LegalCommand::Comments(args) => cmd_legal_comments(args).await,
         LegalCommand::Enforcement(args) => cmd_legal_enforcement(args).await,
         LegalCommand::Statute(args) => cmd_legal_statute(args).await,
+        LegalCommand::Record(args) => cmd_legal_record(args).await,
+        LegalCommand::Opinions(args) => cmd_legal_opinions(args).await,
     }
 }

@@ -2801,6 +2801,11 @@ fn mcp_build_cli_args(tool: &str, args: &serde_json::Value) -> anyhow::Result<Ve
         }
         "legal_statute" => {
             let mut v = vec![s("legal"), s("statute")];
+            for (json_key, flag) in [("state", "--state"), ("chapter", "--chapter")] {
+                if let Some(val) = args.get(json_key).and_then(|x| x.as_str()) {
+                    v.extend([s(flag), s(val)]);
+                }
+            }
             if let Some(n) = args.get("title").and_then(|x| x.as_u64()) {
                 v.extend([s("--title"), n.to_string()]);
             }
@@ -2813,10 +2818,54 @@ fn mcp_build_cli_args(tool: &str, args: &serde_json::Value) -> anyhow::Result<Ve
                 v.extend([s("--congress"), n.to_string()]);
             }
             if v.len() <= 2 {
-                anyhow::bail!("legal_statute needs title (with section) or bill");
+                anyhow::bail!("legal_statute needs title (with section), bill, or state (with section)");
             }
             if let Some(n) = args.get("max_chars").and_then(|x| x.as_u64()) {
                 v.extend([s("--max-chars"), n.to_string()]);
+            }
+            Ok(v)
+        }
+        "legal_state_record" => {
+            let mut v = vec![s("legal"), s("record")];
+            let state = args
+                .get("state")
+                .and_then(|x| x.as_str())
+                .ok_or_else(|| anyhow::anyhow!("state required"))?;
+            v.extend([s("--state"), s(state)]);
+            for (json_key, flag) in [
+                ("county", "--county"),
+                ("case_type", "--case-type"),
+                ("case_no", "--case-no"),
+                ("after", "--after"),
+                ("before", "--before"),
+            ] {
+                if let Some(val) = args.get(json_key).and_then(|x| x.as_str()) {
+                    v.extend([s(flag), s(val)]);
+                }
+            }
+            if args.get("include_dob").and_then(|x| x.as_bool()) == Some(true) {
+                v.push(s("--include-dob"));
+            }
+            if let Some(n) = args.get("limit").and_then(|x| x.as_u64()) {
+                v.extend([s("--limit"), n.to_string()]);
+            }
+            Ok(v)
+        }
+        "legal_state_opinions" => {
+            let mut v = vec![s("legal"), s("opinions")];
+            let state = args
+                .get("state")
+                .and_then(|x| x.as_str())
+                .ok_or_else(|| anyhow::anyhow!("state required"))?;
+            v.extend([s("--state"), s(state)]);
+            if let Some(q) = args.get("q").and_then(|x| x.as_str()) {
+                v.extend([s("--q"), s(q)]);
+            }
+            if args.get("unpublished").and_then(|x| x.as_bool()) == Some(true) {
+                v.push(s("--unpublished"));
+            }
+            if let Some(n) = args.get("limit").and_then(|x| x.as_u64()) {
+                v.extend([s("--limit"), n.to_string()]);
             }
             Ok(v)
         }
@@ -3513,7 +3562,7 @@ mod mcp_tool_tests {
     fn every_advertised_legal_tool_dispatches() {
         let catalog: Vec<serde_json::Value> =
             serde_json::from_str(include_str!("legal_tools.json")).expect("legal catalog parses");
-        assert_eq!(catalog.len(), 9, "catalog size changed — update the samples below");
+        assert_eq!(catalog.len(), 11, "catalog size changed — update the samples below");
 
         // One minimally-valid argument set per tool, chosen to satisfy each
         // tool's required-argument check.
@@ -3527,6 +3576,8 @@ mod mcp_tool_tests {
             ("legal_comments", serde_json::json!({"docket": "SEC-2026-5190"})),
             ("legal_enforcement", serde_json::json!({"source": "doj"})),
             ("legal_statute", serde_json::json!({"title": 15, "section": "78j"})),
+            ("legal_state_record", serde_json::json!({"state": "wi", "county": "Milwaukee"})),
+            ("legal_state_opinions", serde_json::json!({"state": "il"})),
         ];
 
         for tool in &catalog {

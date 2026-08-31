@@ -190,8 +190,26 @@ async fn cmd_legal_enforcement(args: LegalEnforcementArgs) -> Result<()> {
 }
 
 async fn cmd_legal_statute(args: LegalStatuteArgs) -> Result<()> {
+    // --state switches corpora entirely: state codes and the US Code share
+    // nothing but the word "statute".
+    if let Some(state) = args.state.as_deref() {
+        let section = args.section.clone().ok_or_else(|| {
+            anyhow::anyhow!("--state requires --section (e.g. --state wi --section 346.57)")
+        })?;
+        let req = eli_core::legal::states::StateStatuteRequest {
+            state: state.to_string(),
+            section,
+            chapter: args.chapter.clone(),
+            max_chars: args.max_chars,
+        };
+        let resp = eli_core::legal::states::fetch_state_statute(req)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))
+            .context("legal statute (state)")?;
+        return legal_emit(&resp, args.out, "legal.statute.state", &args.format);
+    }
     if args.title.is_none() && args.bill.is_none() {
-        anyhow::bail!("legal statute requires --title (with --section) or --bill (with --congress)");
+        anyhow::bail!("legal statute requires --title (with --section), --bill, or --state");
     }
     let req = eli_core::legal::statute::StatuteRequest {
         title: args.title,
@@ -217,4 +235,39 @@ fn split_csv(input: Option<&str>) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+async fn cmd_legal_record(args: LegalRecordArgs) -> Result<()> {
+    if args.case_no.is_none() && args.county.is_none() {
+        anyhow::bail!("legal record requires --case-no, or --county with a date range");
+    }
+    let req = eli_core::legal::states::StateCaseRequest {
+        state: args.state,
+        county: args.county,
+        case_type: args.case_type,
+        case_no: args.case_no,
+        filed_after: args.after,
+        filed_before: args.before,
+        limit: args.limit.clamp(1, 500),
+        include_dob: args.include_dob,
+    };
+    let resp = eli_core::legal::states::fetch_state_cases(req)
+        .await
+        .map_err(|e| anyhow::anyhow!(e))
+        .context("legal record")?;
+    legal_emit(&resp, args.out, "legal.record", &args.format)
+}
+
+async fn cmd_legal_opinions(args: LegalOpinionsArgs) -> Result<()> {
+    let req = eli_core::legal::states::StateOpinionsRequest {
+        state: args.state,
+        query: args.q,
+        unpublished_only: args.unpublished,
+        limit: args.limit.clamp(1, 200),
+    };
+    let resp = eli_core::legal::states::fetch_state_opinions(req)
+        .await
+        .map_err(|e| anyhow::anyhow!(e))
+        .context("legal opinions")?;
+    legal_emit(&resp, args.out, "legal.opinions", &args.format)
 }
