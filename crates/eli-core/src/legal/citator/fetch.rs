@@ -113,8 +113,12 @@ pub struct CitationResponse {
     /// apart from `verified` so a caller reading only the totals cannot
     /// conclude a misattributed brief checks out.
     pub misattributed: usize,
-    /// No case found at that reporter page, or the check could not be made.
+    /// Checked against the resolver and genuinely not found there.
     pub unverified: usize,
+    /// Never reached the resolver — transport failure or throttle. Unknown,
+    /// not evidence about the citation. Kept apart from `unverified` because a
+    /// network hiccup must never read as "this lawyer invented a case".
+    pub unchecked: usize,
     pub citations: Vec<CitationVerdict>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub cited_by: Vec<NetworkCase>,
@@ -131,6 +135,7 @@ pub async fn fetch_citations(req: CitationRequest) -> Result<CitationResponse> {
         verified: 0,
         misattributed: 0,
         unverified: 0,
+        unchecked: 0,
         citations: Vec::new(),
         cited_by: Vec::new(),
         authorities: Vec::new(),
