@@ -116,20 +116,38 @@ pub(crate) async fn soft_fail(
     None
 }
 
+/// Tags that sit *inside* a word. A closing `</strong>` must not become a
+/// space, or `Act of 202</strong><strong>2` — which is how CRS summaries and
+/// search-hit highlighting arrive — reads back as "Act of 202 2".
+const INLINE_TAGS: &[&str] = &[
+    "a", "b", "i", "u", "em", "strong", "span", "sup", "sub", "mark", "small", "code", "abbr",
+    "cite", "q", "s", "var", "wbr", "e",
+];
+
 /// Strip HTML/XML tags and collapse whitespace. Several of these upstreams
 /// only publish document bodies as markup; the model wants the words.
+///
+/// Block-level tags become a space (so `</p><p>` doesn't weld two sentences
+/// together); inline tags become nothing (so a highlighted fragment doesn't
+/// split a word in half).
 pub(crate) fn strip_markup(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
+    let mut tag = String::new();
     let mut in_tag = false;
     for ch in input.chars() {
         match ch {
-            '<' => in_tag = true,
-            '>' => {
-                in_tag = false;
-                out.push(' ');
+            '<' => {
+                in_tag = true;
+                tag.clear();
             }
-            c if !in_tag => out.push(c),
-            _ => {}
+            '>' if in_tag => {
+                in_tag = false;
+                if !is_inline_tag(&tag) {
+                    out.push(' ');
+                }
+            }
+            c if in_tag => tag.push(c),
+            c => out.push(c),
         }
     }
     let decoded = out
@@ -182,6 +200,30 @@ mod tests {
     }
 
     #[test]
+    fn inline_tags_do_not_split_words() {
+        // How CRS summaries and search highlighting actually arrive.
+        assert_eq!(
+            strip_markup("Postal Service Reform Act of 202</strong><strong>2"),
+            "Postal Service Reform Act of 2022"
+        );
+        assert_eq!(
+            strip_markup("misuse of <strong>material</strong> information"),
+            "misuse of material information"
+        );
+        // Block tags still separate — otherwise sentences weld together.
+        assert_eq!(strip_markup("<p>One.</p><p>Two.</p>"), "One. Two.");
+    }
+
+    #[test]
+    fn keeps_line_structure_when_asked() {
+        let doc = "[FR Doc No: 2025-02524]\nvia the GPO [<a href=\"http://gpo.gov\">gpo.gov</a>]\n\nSUMMARY:";
+        assert_eq!(
+            strip_tags_keep_lines(doc),
+            "[FR Doc No: 2025-02524]\nvia the GPO [gpo.gov]\n\nSUMMARY:"
+        );
+    }
+
+    #[test]
     fn clamp_text_flags_the_cut() {
         let (text, truncated) = clamp_text("abcdef", 3);
         assert_eq!(text, "abc");
@@ -197,6 +239,30 @@ mod tests {
         assert!(parse_date("01/01/2024", "--date").is_err());
         assert!(parse_date("yesterday", "--date").is_err());
     }
+}
+
+/// `"/strong"`, `"a href=\"x\""`, `"br/"` -> the bare tag name.
+fn is_inline_tag(raw: &str) -> bool {
+    let name: String = raw
+        .trim()
+        .trim_start_matches('/')
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    INLINE_TAGS.contains(&name.as_str())
+}
+
+/// Strip tags but keep the line structure. Plain-text documents that arrive
+/// wrapped in markup (the Federal Register serves rule text inside `<pre>`,
+/// with `<a>` tags spliced into it) lose their paragraphing entirely if run
+/// through `strip_markup`, which collapses every newline.
+pub(crate) fn strip_tags_keep_lines(input: &str) -> String {
+    input
+        .lines()
+        .map(strip_markup)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Clamp a document body so one tool call can't blow the context window.

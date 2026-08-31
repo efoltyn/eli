@@ -13,7 +13,7 @@
 //!
 //! No API key. Base: https://www.federalregister.gov/api/v1/
 
-use crate::legal::{clamp_text, parse_date, shared_client, soft_fail};
+use crate::legal::{clamp_text, parse_date, shared_client, soft_fail, strip_tags_keep_lines};
 use crate::{Error, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -401,7 +401,10 @@ fn unwrap_raw_text(body: &str) -> Option<String> {
     if let (Some(start), Some(end)) = (body.find("<pre>"), body.rfind("</pre>")) {
         if end > start {
             let inner = &body[start + "<pre>".len()..end];
-            return Some(html_escape::decode_html_entities(inner).trim().to_string());
+            // GPO splices <a> tags into the plain text; strip them without
+            // flattening the rule's paragraphing.
+            let decoded = html_escape::decode_html_entities(inner);
+            return Some(strip_tags_keep_lines(&decoded).trim().to_string());
         }
     }
     let looks_like_html = body.trim_start().starts_with("<!DOCTYPE")
@@ -545,10 +548,10 @@ mod tests {
 
     #[test]
     fn unwraps_pre_block_and_rejects_access_wall() {
-        let wrapped = "<html><head></head><body><pre>\n[Federal Register Volume 91]\nRule text &amp; more\n</pre></body></html>";
+        let wrapped = "<html><head></head><body><pre>\n[Federal Register Volume 91]\nvia the GPO [<a href=\"http://gpo.gov\">gpo.gov</a>]\n</pre></body></html>";
         assert_eq!(
             unwrap_raw_text(wrapped).as_deref(),
-            Some("[Federal Register Volume 91]\nRule text & more")
+            Some("[Federal Register Volume 91]\nvia the GPO [gpo.gov]")
         );
         assert_eq!(unwrap_raw_text("<!DOCTYPE html>\n<html><body>Request Access</body></html>"), None);
         assert_eq!(unwrap_raw_text("plain rule text").as_deref(), Some("plain rule text"));
