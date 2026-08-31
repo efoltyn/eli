@@ -30,7 +30,7 @@
 //! anonymous callers get 100/day *and* 5/min/50/hour/125/day keyed on client
 //! IP, so every path here is strictly sequential, spaced, and page-capped.
 
-use crate::legal::{courtlistener as cl, shared_client, soft_fail};
+use crate::legal::{courtlistener as cl, shared_client, soft_fail, strip_markup};
 use crate::{Error, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -316,7 +316,9 @@ async fn scotus_docket(key: &str, req: &DocketRequest, out: &mut DocketResponse)
             // docket sheet is the only stable identifier.
             entry_number: Some((start + idx + 1) as u64),
             date_filed: str_of(p, "Date").and_then(|d| iso_date(&d)),
-            description: str_of(p, "Text"),
+            // Order text carries inline <a> links to the slip opinion; the
+            // words are what the caller wants, the markup is noise.
+            description: str_of(p, "Text").map(|t| strip_markup(&t)),
             documents,
         });
     }
@@ -611,6 +613,7 @@ async fn search_entries(id: u64, c: &Candidate, req: &DocketRequest, out: &mut D
     );
     let mut docs: Vec<Value> = Vec::new();
     let mut reported: Option<usize> = None;
+    let mut answered = false;
     let want = req.offset.saturating_add(req.limit.max(1));
     let pages_needed = want.div_ceil(SEARCH_PAGE).clamp(1, MAX_SEARCH_PAGES);
 
@@ -621,6 +624,7 @@ async fn search_entries(id: u64, c: &Candidate, req: &DocketRequest, out: &mut D
         let Some(v) = cl::get(&path, &mut out.warnings).await else {
             break;
         };
+        answered = true;
         if reported.is_none() {
             reported = v.get("count").and_then(|x| x.as_u64()).map(|n| n as usize);
         }
@@ -634,15 +638,33 @@ async fn search_entries(id: u64, c: &Candidate, req: &DocketRequest, out: &mut D
     }
 
     if docs.is_empty() {
-        out.warnings.push(format!(
-            "no filings indexed for docket {id}. Without a token only documents already in the \
-             RECAP Archive are visible; entries nobody has purchased from PACER are invisible \
-             here. Set COURTLISTENER_TOKEN for the authoritative docket sheet."
-        ));
-        // Fall back to the ≤3 filings the type=r result already carried, so we
+        // Two very different failures land here and the caller has to be able
+        // to tell them apart: an upstream refusal (already warned about just
+        // above, usually a 429) versus a docket nobody has liberated yet.
+        out.warnings.push(if answered {
+            format!(
+                "no filings indexed for docket {id}. Without a token only documents already in \
+                 the RECAP Archive are visible; entries nobody has bought out of PACER do not \
+                 appear. Set COURTLISTENER_TOKEN for the authoritative docket sheet."
+            )
+        } else {
+            format!(
+                "could not read the docket sheet for {id} (see the error above); falling back to \
+                 the filings the docket search had already returned. Re-run after the retry-after \
+                 window, or set COURTLISTENER_TOKEN for your own rate-limit bucket."
+            )
+        });
+        // Fall back to the filings the type=r result already carried, so we
         // return something rather than nothing.
         out.entries = c.entries.clone();
         out.entry_count = c.entries.len();
+        if !c.entries.is_empty() {
+            out.warnings.push(format!(
+                "`entry_count` here is only the {} filings RECAP search nested under this docket, \
+                 not the size of the real docket sheet.",
+                c.entries.len()
+            ));
+        }
         return;
     }
 
@@ -973,7 +995,9 @@ fn entries_from_documents(docs: &[Value], court: &str, pacer_case_id: Option<&st
         };
         // The long clerk text lives on the document row in search results; the
         // entry description is the same string, so take the longest one seen.
-        let long_desc = str_of(d, "description");
+        // Minute entries carry only the short label, so fall back to it rather
+        // than emitting a row with no description at all.
+        let long_desc = str_of(d, "description").or_else(|| str_of(d, "short_description"));
         match entries
             .iter_mut()
             .find(|e| e.entry_number.is_some() && e.entry_number == entry_number)

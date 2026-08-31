@@ -633,7 +633,7 @@ fn network_case(raw: &serde_json::Value) -> NetworkCase {
 /// so a year or a phone number cannot pose as one.
 static CITE_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
     Regex::new(
-        r"(?P<vol>\b\d{1,4})\s+(?P<rep>(?:[A-Z][A-Za-z'&]*\.?|\d[a-z]{1,2}\.?)(?:\s+(?:[A-Z][A-Za-z'&]*\.?|\d[a-z]{1,2}\.?)){0,4})\s+(?P<page>\d{1,5})(?![\d\-])",
+        r"(?P<vol>\b\d{1,4})\s+(?P<rep>(?:[A-Z][A-Za-z0-9'&.]*|\d[a-z]{1,2}\.?)(?:\s+(?:[A-Z][A-Za-z0-9'&.]*|\d[a-z]{1,2}\.?)){0,4})\s+(?P<page>\d{1,5})\b",
     )
     .ok()
 });

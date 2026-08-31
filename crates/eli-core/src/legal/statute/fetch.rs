@@ -174,6 +174,11 @@ async fn us_code_mode(title: u32, req: &StatuteRequest) -> Result<StatuteRespons
         .push(format!("{GOVINFO_LINK}/uscode/{title}/{section}?link-type=pdf"));
 
     let Some(body) = fetch_document(&url, "govinfo link (uscode)", &mut out.warnings).await else {
+        out.warnings.push(format!(
+            "{} did not resolve — US Code sections look like \"78j\", \"107\" or \"1681a\"; a \
+             dotted number like \"240.10b-5\" is a CFR citation, use the cfr tool for those",
+            out.citation.clone().unwrap_or_default()
+        ));
         return Ok(out);
     };
 
@@ -342,8 +347,11 @@ async fn bill_mode(raw: &str, req: &StatuteRequest) -> Result<StatuteResponse> {
                 "{raw:?} is not a bill number (expected e.g. \"hr3076\" or \"s1720\"); searched \
                  bill titles for it instead"
             ));
+            // No `sort` here: GovTrack orders `q` hits by relevance, and
+            // sorting by Congress would throw that away and hand back whatever
+            // recent bill happens to share a word with the query.
             let mut u = format!(
-                "{GOVTRACK_BILL}?q={}&sort=-congress&limit=5&fields={GOVTRACK_FIELDS}",
+                "{GOVTRACK_BILL}?q={}&limit=5&fields={GOVTRACK_FIELDS}",
                 urlencoding::encode(raw.trim())
             );
             if let Some(c) = req.congress {
@@ -366,8 +374,18 @@ async fn bill_mode(raw: &str, req: &StatuteRequest) -> Result<StatuteResponse> {
         .and_then(|c| c.as_u64())
         .unwrap_or(0);
 
+    // GovTrack answering "no such bill" is authoritative enough to skip the
+    // bulk fetch; only an unreachable GovTrack justifies trying BILLSTATUS blind.
+    let no_such_bill = govtrack.is_some() && hit.is_none();
+
     if let Some(bill) = hit {
         apply_govtrack(bill, &mut out);
+        if parsed.is_none() {
+            out.warnings.push(format!(
+                "took the best title match of {total} ({}) — pass a bill number for an exact hit",
+                out.citation.clone().unwrap_or_default()
+            ));
+        }
         // Bill numbers repeat every Congress, so "H.R. 3076" alone is
         // ambiguous — say which one we picked and how many others exist.
         if req.congress.is_none() && total > 1 {
@@ -409,7 +427,8 @@ async fn bill_mode(raw: &str, req: &StatuteRequest) -> Result<StatuteResponse> {
 
     // govinfo BILLSTATUS: the CRS summary, policy area, latest action and the
     // public law number — none of which GovTrack exposes in this shape.
-    if let (Some(id), Some(c)) = (parsed.as_ref(), congress) {
+    let id = parsed.or_else(|| hit.and_then(bill_id_from_govtrack));
+    if let (Some(id), Some(c), false) = (id.as_ref(), congress, no_such_bill) {
         if c < BILLSTATUS_EARLIEST_CONGRESS {
             out.warnings.push(format!(
                 "govinfo BILLSTATUS starts at the {} Congress; no summary available for the {}",
@@ -545,17 +564,7 @@ fn parse_bill_id(raw: &str) -> Option<BillId> {
     let split = compact.find(|c: char| c.is_ascii_digit())?;
     let (prefix, digits) = compact.split_at(split);
     let number: u32 = digits.parse().ok()?;
-    let (code, govtrack_type, label) = match prefix {
-        "hr" => ("hr", "house_bill", "H.R."),
-        "s" => ("s", "senate_bill", "S."),
-        "hres" => ("hres", "house_resolution", "H.Res."),
-        "sres" => ("sres", "senate_resolution", "S.Res."),
-        "hjres" => ("hjres", "house_joint_resolution", "H.J.Res."),
-        "sjres" => ("sjres", "senate_joint_resolution", "S.J.Res."),
-        "hconres" => ("hconres", "house_concurrent_resolution", "H.Con.Res."),
-        "sconres" => ("sconres", "senate_concurrent_resolution", "S.Con.Res."),
-        _ => return None,
-    };
+    let &(code, govtrack_type, label) = BILL_KINDS.iter().find(|k| k.0 == prefix)?;
     Some(BillId {
         code,
         govtrack_type,
@@ -563,6 +572,32 @@ fn parse_bill_id(raw: &str) -> Option<BillId> {
         number,
     })
 }
+
+/// The reverse trip: a GovTrack hit from a *title* search carries its own type
+/// and number, which is what the BILLSTATUS URL needs.
+fn bill_id_from_govtrack(bill: &serde_json::Value) -> Option<BillId> {
+    let govtrack_type = bill.get("bill_type")?.as_str()?;
+    let number = bill.get("number")?.as_u64()? as u32;
+    let &(code, govtrack_type, label) = BILL_KINDS.iter().find(|k| k.1 == govtrack_type)?;
+    Some(BillId {
+        code,
+        govtrack_type,
+        label,
+        number,
+    })
+}
+
+/// (bulkdata code, GovTrack `bill_type`, citation label).
+const BILL_KINDS: &[(&str, &str, &str)] = &[
+    ("hr", "house_bill", "H.R."),
+    ("s", "senate_bill", "S."),
+    ("hres", "house_resolution", "H.Res."),
+    ("sres", "senate_resolution", "S.Res."),
+    ("hjres", "house_joint_resolution", "H.J.Res."),
+    ("sjres", "senate_joint_resolution", "S.J.Res."),
+    ("hconres", "house_concurrent_resolution", "H.Con.Res."),
+    ("sconres", "senate_concurrent_resolution", "S.Con.Res."),
+];
 
 fn billstatus_url(congress: u32, code: &str, number: u32) -> String {
     format!("{BILLSTATUS_BULK}/{congress}/{code}/BILLSTATUS-{congress}{code}{number}.xml")
@@ -696,8 +731,16 @@ fn between<'a>(haystack: &'a str, start: &str, end: &str) -> Option<&'a str> {
 /// Markup -> words. `strip_markup` handles tags and the common entities; GPO
 /// text is full of `&sect;`, `&ndash;` and `&mdash;`, so decode the rest after
 /// the tags are gone (decoding first would create tags that then get stripped).
+///
+/// Inline tags go first, without a separator: `strip_markup` turns every `>`
+/// into a space, and CRS summaries really do contain
+/// `Act of 202</strong><strong>2`, which would otherwise come out as "202 2".
 fn plain(markup: &str) -> String {
-    let stripped = strip_markup(markup);
+    static INLINE_TAG: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"(?i)</?(?:strong|em|b|i|u|span|sub|sup|a)\b[^>]*>")
+            .expect("static inline-tag regex")
+    });
+    let stripped = strip_markup(&INLINE_TAG.replace_all(markup, ""));
     let decoded = html_escape::decode_html_entities(&stripped);
     decoded.split_whitespace().collect::<Vec<_>>().join(" ")
 }

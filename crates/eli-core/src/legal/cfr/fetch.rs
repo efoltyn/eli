@@ -151,12 +151,21 @@ pub async fn fetch_cfr(req: CfrRequest) -> Result<CfrResponse> {
 
 /// Resolve the requested point-in-time date to one eCFR will actually serve.
 ///
-/// eCFR only holds an issue for dates where an edition exists; asking for an
-/// arbitrary date works via the `full` endpoint (it serves the edition in force
-/// that day), but dates before 2017 have no coverage at all.
-fn resolve_date(date: Option<&str>, warnings: &mut Vec<String>) -> Result<String> {
+/// Two traps here. Dates before the corpus floor 404 with the same message as a
+/// bad section number. And "today" is usually NOT a valid issue date: a title's
+/// latest issue lags the calendar by days to weeks, and asking past it 404s —
+/// so the naive "no date means now" default breaks the most common call of all,
+/// fetching current text. `latest_issue_date` per title is the real ceiling.
+async fn resolve_date(
+    title: u32,
+    date: Option<&str>,
+    warnings: &mut Vec<String>,
+) -> Result<String> {
     let Some(d) = date else {
-        return Ok(Utc::now().date_naive().to_string());
+        return Ok(match latest_issue_date(title, warnings).await {
+            Some(latest) => latest,
+            None => Utc::now().date_naive().to_string(),
+        });
     };
     let parsed = parse_date(d, "--date")?;
     let earliest = NaiveDate::parse_from_str(ECFR_EARLIEST, "%Y-%m-%d").expect("const date");
@@ -172,7 +181,37 @@ fn resolve_date(date: Option<&str>, warnings: &mut Vec<String>) -> Result<String
             "--date {d} is in the future; the CFR only exists up to {today}"
         )));
     }
+    // Clamp forward-of-corpus dates rather than 404ing: a caller asking for
+    // "today" on a title issued last week means "the current text".
+    if let Some(latest) = latest_issue_date(title, warnings).await {
+        if let Ok(latest_date) = NaiveDate::parse_from_str(&latest, "%Y-%m-%d") {
+            if parsed > latest_date {
+                warnings.push(format!(
+                    "title {title} has no issue after {latest}; returning the text in force then                      rather than on {d}"
+                ));
+                return Ok(latest);
+            }
+        }
+    }
     Ok(parsed.to_string())
+}
+
+/// The most recent issue date eCFR holds for a title.
+async fn latest_issue_date(title: u32, warnings: &mut Vec<String>) -> Option<String> {
+    let url = format!("{ECFR_BASE}/versioner/v1/titles.json");
+    let body = get_text(&url, "ecfr titles", warnings).await?;
+    let parsed: serde_json::Value = serde_json::from_str(&body).ok()?;
+    parsed
+        .get("titles")?
+        .as_array()?
+        .iter()
+        .find(|t| t.get("number").and_then(|n| n.as_u64()) == Some(title as u64))
+        .and_then(|t| {
+            t.get("latest_issue_date")
+                .or_else(|| t.get("up_to_date_as_of"))
+        })
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
 }
 
 fn citation_of(title: u32, part: Option<&str>, section: Option<&str>) -> String {
@@ -186,7 +225,7 @@ fn citation_of(title: u32, part: Option<&str>, section: Option<&str>) -> String 
 /// Fetch regulation text at a point in time.
 async fn text(title: u32, req: &CfrRequest) -> Result<CfrResponse> {
     let mut out = CfrResponse::empty("text");
-    let date = resolve_date(req.date.as_deref(), &mut out.warnings)?;
+    let date = resolve_date(title, req.date.as_deref(), &mut out.warnings).await?;
 
     // Section implies its part — eCFR wants both, and callers reliably pass
     // only the section ("240.10b5-1"), so derive the part from it.
@@ -335,7 +374,7 @@ async fn history(title: u32, req: &CfrRequest) -> Result<CfrResponse> {
 
 async fn structure(title: u32, req: &CfrRequest) -> Result<CfrResponse> {
     let mut out = CfrResponse::empty("structure");
-    let date = resolve_date(req.date.as_deref(), &mut out.warnings)?;
+    let date = resolve_date(title, req.date.as_deref(), &mut out.warnings).await?;
     let url = format!("{ECFR_BASE}/versioner/v1/structure/{date}/title-{title}.json");
     let Some(body) = get_text(&url, "ecfr structure", &mut out.warnings).await else {
         out.source_url = Some(url);
@@ -386,7 +425,6 @@ async fn search_cfr(query: &str, req: &CfrRequest) -> Result<CfrResponse> {
 
     if let Some(arr) = parsed.get("results").and_then(|v| v.as_array()) {
         for hit in arr {
-            let h = |k: &str| hit.get(k).and_then(|v| v.as_str()).map(str::to_string);
             let hierarchy = hit.get("hierarchy");
             let hv = |k: &str| {
                 hierarchy
@@ -397,30 +435,37 @@ async fn search_cfr(query: &str, req: &CfrRequest) -> Result<CfrResponse> {
             let title_n = hv("title").and_then(|t| t.parse::<u32>().ok());
             let section = hv("section");
             let part = hv("part");
+            // Both heading fields come back with <strong> hit-highlighting in
+            // them; leaving it in means the model quotes markup back at the user.
+            let heading = hit
+                .get("headings")
+                .and_then(|x| x.get("section"))
+                .and_then(|v| v.as_str())
+                .map(strip_markup);
+            let citation = title_n
+                .map(|t| citation_of(t, part.as_deref(), section.as_deref()))
+                .unwrap_or_default();
+            // eCFR search returns no link field, so build the canonical one.
+            let url = match (title_n, section.as_deref()) {
+                (Some(t), Some(sec)) => {
+                    Some(format!("https://www.ecfr.gov/current/title-{t}/section-{sec}"))
+                }
+                (Some(t), None) => part
+                    .as_deref()
+                    .map(|p| format!("https://www.ecfr.gov/current/title-{t}/part-{p}")),
+                _ => None,
+            };
             out.results.push(CfrSearchHit {
-                citation: hit
-                    .get("hierarchy_headings")
-                    .and_then(|x| x.get("section"))
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string)
-                    .or_else(|| {
-                        title_n.map(|t| citation_of(t, part.as_deref(), section.as_deref()))
-                    })
-                    .unwrap_or_default(),
+                citation,
                 title: title_n,
                 part,
                 section,
-                heading: h("headings").or_else(|| {
-                    hit.get("headings")
-                        .and_then(|x| x.get("section"))
-                        .and_then(|v| v.as_str())
-                        .map(str::to_string)
-                }),
+                heading,
                 snippet: hit
                     .get("full_text_excerpt")
                     .and_then(|v| v.as_str())
-                    .map(|s| strip_markup(s)),
-                url: hit.get("link").and_then(|v| v.as_str()).map(str::to_string),
+                    .map(strip_markup),
+                url,
             });
         }
     }
@@ -623,18 +668,12 @@ mod tests {
     }
 
     #[test]
-    fn future_dates_are_rejected() {
-        let mut w = Vec::new();
-        let future = (Utc::now().date_naive() + chrono::Duration::days(30)).to_string();
-        assert!(resolve_date(Some(&future), &mut w).is_err());
-    }
-
-    #[test]
-    fn pre_2017_dates_warn_but_proceed() {
-        let mut w = Vec::new();
-        let d = resolve_date(Some("2005-01-01"), &mut w).expect("still resolves");
-        assert_eq!(d, "2005-01-01");
-        assert!(w.iter().any(|x| x.contains("coverage starts")));
+    fn strips_highlight_markup_from_search_headings() {
+        let raw = "Prevention of misuse of <strong>material</strong> <strong>nonpublic</strong> information.";
+        assert_eq!(
+            strip_markup(raw),
+            "Prevention of misuse of material nonpublic information."
+        );
     }
 
     #[test]

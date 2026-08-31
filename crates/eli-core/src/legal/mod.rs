@@ -154,7 +154,49 @@ pub(crate) fn strip_markup(input: &str) -> String {
             last_ws = false;
         }
     }
-    collapsed.trim().to_string()
+    // Tag boundaries become spaces, which strands one before any punctuation
+    // that followed a closing tag ("information ."). Left in, it shows up in
+    // quoted regulatory text.
+    let mut out = String::with_capacity(collapsed.len());
+    for ch in collapsed.chars() {
+        if matches!(ch, '.' | ',' | ';' | ':' | ')' | ']' | '!' | '?') && out.ends_with(' ') {
+            out.pop();
+        }
+        out.push(ch);
+    }
+    out.trim().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strips_tags_entities_and_stranded_punctuation() {
+        assert_eq!(
+            strip_markup("<p>Misuse of <strong>material</strong> information</p>."),
+            "Misuse of material information."
+        );
+        assert_eq!(strip_markup("A &amp; B &quot;quoted&quot;"), "A & B \"quoted\"");
+        assert_eq!(strip_markup("<a href=\"x\">link</a> ; next"), "link; next");
+    }
+
+    #[test]
+    fn clamp_text_flags_the_cut() {
+        let (text, truncated) = clamp_text("abcdef", 3);
+        assert_eq!(text, "abc");
+        assert!(truncated);
+        let (text, truncated) = clamp_text("abc", 10);
+        assert_eq!(text, "abc");
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn parse_date_rejects_other_formats() {
+        assert!(parse_date("2024-01-01", "--date").is_ok());
+        assert!(parse_date("01/01/2024", "--date").is_err());
+        assert!(parse_date("yesterday", "--date").is_err());
+    }
 }
 
 /// Clamp a document body so one tool call can't blow the context window.
