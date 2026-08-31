@@ -28,7 +28,7 @@
 //! fabrication, not proof. Unpublished, sealed, very recent, and never-digitised
 //! decisions exist outside it.
 
-use crate::legal::courtlistener::{self, CL_WEB};
+use crate::legal::courtlistener::{tidy_case_name, self, CL_WEB};
 use crate::legal::{keys, shared_client, strip_markup};
 use crate::{Error, Result};
 use chrono::{DateTime, Utc};
@@ -314,7 +314,8 @@ fn apply_attribution(v: &mut CitationVerdict) {
         // Confirmed on both axes — say so, rather than leaving the generic
         // "check the name yourself" caveat on a cite we already checked.
         v.note = Some(format!(
-            "verified: the reporter page exists and resolves to {resolved}, which matches the              case name used in the text."
+            "verified: the reporter page exists and resolves to {resolved}, which matches the \
+             case name used in the text."
         ));
         return;
     }
@@ -949,29 +950,6 @@ fn preceding_case_name(before: &str) -> Option<String> {
     (!cleaned.is_empty()).then_some(cleaned)
 }
 
-/// Title-case a slug-derived name the way a citation would be written:
-/// "Nken V Holder" -> "Nken v. Holder", "In Re Marriage Of Bonds" ->
-/// "In re Marriage of Bonds".
-fn tidy_case_name(raw: &str) -> String {
-    const PARTICLES: &[&str] = &[
-        "of", "the", "and", "in", "re", "ex", "rel", "a", "an", "for", "on", "at", "to", "de",
-        "van", "von", "der", "el", "la", "et", "al", "as",
-    ];
-    raw.split_whitespace()
-        .enumerate()
-        .map(|(i, w)| {
-            if w.eq_ignore_ascii_case("v") {
-                return "v.".to_string();
-            }
-            let lower = w.to_ascii_lowercase();
-            if i > 0 && PARTICLES.contains(&lower.as_str()) {
-                return lower;
-            }
-            w.to_string()
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
 
 /// Identifying words in a case name: lowercased, depunctuated, with the
 /// boilerplate that every other caption shares removed.

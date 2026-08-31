@@ -228,7 +228,8 @@ pub(crate) fn parse_opinion_url(url: &str) -> (Option<u64>, Option<String>) {
     };
     let id = segments.get(idx + 1).and_then(|s| s.parse::<u64>().ok());
     let name = segments.get(idx + 2).map(|slug| {
-        slug.split('-')
+        let titled = slug
+            .split('-')
             .map(|w| {
                 let mut chars = w.chars();
                 match chars.next() {
@@ -237,9 +238,38 @@ pub(crate) fn parse_opinion_url(url: &str) -> (Option<u64>, Option<String>) {
                 }
             })
             .collect::<Vec<_>>()
-            .join(" ")
+            .join(" ");
+        tidy_case_name(&titled)
     });
     (id, name)
+}
+
+/// Make a slug-derived caption read like a case name: "Nken V Holder" is
+/// jarring enough that a reader discounts the verdict it is attached to, and
+/// this name is quoted straight back at the user by the citator.
+///
+/// The slug has already lost the hyphens inside surnames ("Maciel-Alcala"
+/// arrives as "Maciel Alcala"); we cannot recover those, but we can stop making
+/// it worse by title-casing the particles.
+pub(crate) fn tidy_case_name(raw: &str) -> String {
+    const PARTICLES: &[&str] = &[
+        "of", "the", "and", "in", "re", "ex", "rel", "a", "an", "for", "on", "at", "to", "de",
+        "van", "von", "der", "el", "la", "et", "al", "as",
+    ];
+    raw.split_whitespace()
+        .enumerate()
+        .map(|(i, w)| {
+            if w.eq_ignore_ascii_case("v") {
+                return "v.".to_string();
+            }
+            let lower = w.to_ascii_lowercase();
+            if i > 0 && PARTICLES.contains(&lower.as_str()) {
+                return lower;
+            }
+            w.to_string()
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[cfg(test)]
@@ -310,7 +340,19 @@ mod tests {
         let (id, name) =
             parse_opinion_url("https://www.courtlistener.com/opinion/145884/nken-v-holder/");
         assert_eq!(id, Some(145884));
-        assert_eq!(name.as_deref(), Some("Nken V Holder"));
+        assert_eq!(name.as_deref(), Some("Nken v. Holder"));
+    }
+
+    #[test]
+    fn tidies_slug_derived_captions() {
+        assert_eq!(
+            tidy_case_name("New York State Rifle Pistol Assn Inc V Bruen"),
+            "New York State Rifle Pistol Assn Inc v. Bruen"
+        );
+        assert_eq!(
+            tidy_case_name("In Re Grand Jury Subpoena"),
+            "In re Grand Jury Subpoena"
+        );
     }
 
     #[test]

@@ -359,12 +359,16 @@ fn parse_hit(raw: &serde_json::Value, kind: &str) -> CaseHit {
         .map(clean_snippet)
         .filter(|t| !t.is_empty());
 
+    // `highlight=on` wraps matches in `<mark>` here too, so a citation would
+    // otherwise come back as "<mark>597 U.S. 1</mark>".
     let citation = raw
         .get("citation")
         .and_then(|v| v.as_array())
         .map(|a| {
             a.iter()
                 .filter_map(|c| c.as_str())
+                .map(strip_markup)
+                .filter(|c| !c.is_empty())
                 .collect::<Vec<_>>()
                 .join("; ")
         })
@@ -781,7 +785,10 @@ async fn search_fallback(
         return;
     };
     let parsed = parse_hit(hit, "o");
-    out.case_name = out.case_name.take().or(parsed.case_name);
+    // This hit was validated as *being* the cited case, so its caption is the
+    // real one — better than the case name inferred from a URL slug, which
+    // loses ampersands, commas and hyphens.
+    out.case_name = parsed.case_name.or(out.case_name.take());
     out.court = out.court.take().or(parsed.court);
     out.date_filed = out.date_filed.take().or(parsed.date_filed);
     out.status = out.status.take().or(parsed.status);
@@ -1011,7 +1018,7 @@ mod tests {
             "docketNumber": "23-3018",
             "cluster_id": 10958441,
             "docket_id": 73108335,
-            "citation": ["612 F.3d 1099", "2010 WL 1"],
+            "citation": ["<mark>612 F.3d 1099</mark>", "2010 WL 1"],
             "citeCount": 7,
             "status": "Published",
             "absolute_url": "/opinion/10958441/grenning-v-key/",
