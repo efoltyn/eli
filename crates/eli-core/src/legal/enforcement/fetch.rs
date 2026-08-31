@@ -322,7 +322,11 @@ async fn sec_feed(url: &str, source: &str, ua: &str) -> (Vec<EnforcementAction>,
         .into_iter()
         .map(|it| EnforcementAction {
             source: source.to_string(),
-            respondents: extract_respondents(&it.title),
+            // SEC's RSS <title> *is* the case caption — the release title
+            // field holds the party names, nothing else — so a bare title may
+            // be read as a party here. DOJ's headlines are sentences and get
+            // no such licence.
+            respondents: extract_respondents(&it.title, true),
             title: (!it.title.is_empty()).then(|| it.title.clone()),
             date: it.date,
             // SEC puts the release number in <dc:creator>, which is the one
@@ -442,7 +446,11 @@ fn doj_to_action(row: &serde_json::Value) -> Option<EnforcementAction> {
 
     Some(EnforcementAction {
         source: "doj".to_string(),
-        respondents: extract_respondents(&title),
+        // `false`: a DOJ headline is prose. "Statement ... of the Merger of
+        // Seismic Software Inc. and Highspot Inc." ends in a corporate suffix
+        // and names no defendant; only an explicit "United States v. X"
+        // caption counts.
+        respondents: extract_respondents(&title, false),
         title: Some(title),
         date,
         release_number: row
@@ -715,14 +723,15 @@ const ENTITY_SUFFIXES: &[&str] = &[
 /// *states* them.
 ///
 /// Three shapes count as stated: a court caption ("SEC v. X", "United States v.
-/// X"), an administrative caption ("In the Matter of Y"), and a bare title that
-/// ends in a corporate suffix or an "et al." So "Ichcoin Tech Corp." and
-/// "Stephen E. Buyer, et al." yield a party, while "False Forms ADV Filings" —
-/// a real SEC litigation-release title that names a topic, not a defendant —
-/// correctly yields nothing. Everything else returns empty: a wrong respondent
-/// is worse than no respondent, because it reads as a factual claim that a
-/// named party was charged.
-fn extract_respondents(title: &str) -> Vec<String> {
+/// X"), an administrative caption ("In the Matter of Y"), and — only where
+/// `bare_title_is_caption`, i.e. the SEC feeds, whose title field holds nothing
+/// but the parties — a bare title ending in a corporate suffix or an "et al."
+/// So "Ichcoin Tech Corp." and "Stephen E. Buyer, et al." yield a party, while
+/// "False Forms ADV Filings" — a real SEC litigation-release title that names a
+/// topic, not a defendant — correctly yields nothing. Everything else returns
+/// empty: a wrong respondent is worse than no respondent, because it reads as a
+/// factual claim that a named party was charged.
+fn extract_respondents(title: &str, bare_title_is_caption: bool) -> Vec<String> {
     let t = title.trim();
     if t.is_empty() {
         return Vec::new();
@@ -731,7 +740,7 @@ fn extract_respondents(title: &str) -> Vec<String> {
         c.get(1).map(|m| m.as_str().to_string())
     } else if let Some(c) = MATTER_RE.captures(t) {
         c.get(1).map(|m| m.as_str().to_string())
-    } else if bare_title_is_a_party(t) {
+    } else if bare_title_is_caption && bare_title_is_a_party(t) {
         Some(t.to_string())
     } else {
         None
@@ -743,6 +752,13 @@ fn extract_respondents(title: &str) -> Vec<String> {
 }
 
 fn bare_title_is_a_party(t: &str) -> bool {
+    // A caption is a name, not a sentence. Even inside a feed whose titles are
+    // captions, a long one is a topic heading ("Charges Against Three Former
+    // Executives of ..."), so cap the length before trusting the suffix.
+    const MAX_CAPTION_WORDS: usize = 12;
+    if t.split_whitespace().count() > MAX_CAPTION_WORDS {
+        return false;
+    }
     let lower = t.to_lowercase();
     if lower.contains("et al") {
         return true;
@@ -853,38 +869,55 @@ mod tests {
     #[test]
     fn respondents_come_only_from_titles_that_state_them() {
         assert_eq!(
-            extract_respondents("SEC v. Jane Q. Public, et al."),
+            extract_respondents("SEC v. Jane Q. Public, et al.", true),
             vec!["Jane Q. Public".to_string()]
         );
         assert_eq!(
-            extract_respondents("In the Matter of ERHC Energy, Inc."),
+            extract_respondents("In the Matter of ERHC Energy, Inc.", true),
             vec!["ERHC Energy, Inc".to_string()]
         );
         assert_eq!(
-            extract_respondents("United States v. Acme Holdings LLC"),
+            extract_respondents("United States v. Acme Holdings LLC", false),
             vec!["Acme Holdings LLC".to_string()]
         );
         assert_eq!(
-            extract_respondents("Ichcoin Tech Corp."),
+            extract_respondents("Ichcoin Tech Corp.", true),
             vec!["Ichcoin Tech Corp".to_string()]
         );
         assert_eq!(
-            extract_respondents("Stephen E. Buyer, et al."),
+            extract_respondents("Stephen E. Buyer, et al.", true),
             vec!["Stephen E. Buyer".to_string()]
         );
         // A topic headline names no party — must stay empty rather than guess.
-        assert!(extract_respondents("False Forms ADV Filings").is_empty());
+        assert!(extract_respondents("False Forms ADV Filings", true).is_empty());
         assert!(extract_respondents(
-            "Justice Department Reaffirms Veterinary Accreditation Standards"
+            "Justice Department Reaffirms Veterinary Accreditation Standards",
+            false
         )
         .is_empty());
-        assert!(extract_respondents("").is_empty());
+        // The regression that motivated `bare_title_is_caption`: a DOJ
+        // headline that happens to end in a corporate suffix names no party.
+        assert!(extract_respondents(
+            "Statement of the Antitrust Division on the Closing of Its Investigation of the \
+             Merger of Seismic Software Inc. and Highspot Inc.",
+            false
+        )
+        .is_empty());
+        // ...and is rejected on length even if a feed claims its titles are
+        // captions.
+        assert!(extract_respondents(
+            "Statement of the Antitrust Division on the Closing of Its Investigation of the \
+             Merger of Seismic Software Inc. and Highspot Inc.",
+            true
+        )
+        .is_empty());
+        assert!(extract_respondents("", true).is_empty());
     }
 
     #[test]
     fn party_lists_split_only_on_unambiguous_separators() {
         assert_eq!(
-            extract_respondents("SEC v. Alpha Corp., Beta Corp., and Gamma Corp."),
+            extract_respondents("SEC v. Alpha Corp., Beta Corp., and Gamma Corp.", true),
             vec![
                 "Alpha Corp".to_string(),
                 "Beta Corp".to_string(),
@@ -893,7 +926,7 @@ mod tests {
         );
         // A bare " and " may be part of one name — do not split it.
         assert_eq!(
-            extract_respondents("SEC v. Smith and Wesson Advisors"),
+            extract_respondents("SEC v. Smith and Wesson Advisors", true),
             vec!["Smith and Wesson Advisors".to_string()]
         );
     }

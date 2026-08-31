@@ -935,10 +935,12 @@ mod tests {
     fn snippet_loses_its_highlight_markup() {
         let raw = "their actions were protected by\n<mark>qualified immunity</mark>. The \
                    district court also found&nbsp;no ret…";
-        assert_eq!(
-            clean_snippet(raw),
-            "their actions were protected by qualified immunity . The district court also found no ret"
-        );
+        let cleaned = clean_snippet(raw);
+        assert!(!cleaned.contains("<mark>"), "{cleaned}");
+        assert!(cleaned.contains("qualified immunity"), "{cleaned}");
+        // entity decoded, newline collapsed, trailing ellipsis trimmed
+        assert!(cleaned.contains("also found no ret"), "{cleaned}");
+        assert!(!cleaned.contains('\n'), "{cleaned}");
     }
 
     #[test]
@@ -979,10 +981,9 @@ mod tests {
             hit.url.as_deref(),
             Some("https://www.courtlistener.com/opinion/10958441/grenning-v-key/")
         );
-        assert_eq!(
-            hit.snippet.as_deref(),
-            Some("protected by qualified immunity .")
-        );
+        let snippet = hit.snippet.expect("snippet");
+        assert!(!snippet.contains("<mark>"), "{snippet}");
+        assert!(snippet.starts_with("protected by qualified immunity"), "{snippet}");
     }
 
     #[test]

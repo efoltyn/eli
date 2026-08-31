@@ -176,7 +176,7 @@ pub async fn fetch_docket(req: DocketRequest) -> Result<DocketResponse> {
              a match. Re-run with --court to pin one."
                 .to_string(),
         );
-        by_search(&format!("docketNumber:\"{number}\""), None, &req, &mut out).await;
+        by_search_filters(None, number.trim(), &req, &mut out).await;
         return Ok(out);
     }
     if let Some(q) = req.query.as_deref() {
@@ -475,24 +475,28 @@ async fn by_court_and_number(
             }
         }
     }
-    by_search_court_number(&court, number.trim(), req, out).await;
+    by_search_filters(Some(&court), number.trim(), req, out).await;
 }
 
 // ── CourtListener: the key-free RECAP search paths ─────────────────────────
 
 /// `type=r` filtered by the sidebar params, which are accepted anonymously with
-/// no `q` at all (measured). Returns dockets with up to three nested filings.
-async fn by_search_court_number(
-    court: &str,
+/// no `q` at all (measured) and fuzzy-match the docket number. Preferred over a
+/// fielded `q=docketNumber:...` because docket numbers contain colons, which the
+/// query parser reads as a field separator.
+async fn by_search_filters(
+    court: Option<&str>,
     number: &str,
     req: &DocketRequest,
     out: &mut DocketResponse,
 ) {
-    let path = format!(
-        "search/?type=r&court={}&docket_number={}",
-        urlencoding::encode(court),
+    let mut path = format!(
+        "search/?type=r&docket_number={}",
         urlencoding::encode(number)
     );
+    if let Some(c) = court.filter(|c| !c.is_empty()) {
+        path.push_str(&format!("&court={}", urlencoding::encode(c)));
+    }
     let Some(v) = cl::get(&path, &mut out.warnings).await else {
         return;
     };
@@ -668,7 +672,7 @@ async fn search_entries(id: u64, c: &Candidate, req: &DocketRequest, out: &mut D
         return;
     }
 
-    let all = entries_from_documents(&docs, &court, pacer_case_id.as_deref());
+    let all = entries_from_documents(&docs, &court);
     // `entry_count` must describe the whole docket, not this window. When we
     // exhausted the result set the grouped count is exact; when we stopped at
     // the page cap, the document total is the honest upper bound we have.
@@ -958,7 +962,7 @@ fn candidates_from_search(v: &Value) -> Vec<Candidate> {
                 assigned_to: str_of(r, "assignedTo"),
                 jury_demand: str_of(r, "juryDemand"),
                 absolute_url: str_of(r, "docket_absolute_url").map(|u| absolute_cl_url(&u)),
-                entries: entries_from_documents(&docs, court.as_deref().unwrap_or(""), pacer_case_id.as_deref()),
+                entries: entries_from_documents(&docs, court.as_deref().unwrap_or("")),
                 max_entry_number,
                 pacer_case_id,
                 court,
@@ -975,7 +979,7 @@ fn candidates_from_search(v: &Value) -> Vec<Candidate> {
 /// entry number (minute entries, stray attachments) are kept in their own
 /// trailing bucket rather than dropped — a missing row is worse than an
 /// unnumbered one.
-fn entries_from_documents(docs: &[Value], court: &str, pacer_case_id: Option<&str>) -> Vec<DocketEntry> {
+fn entries_from_documents(docs: &[Value], court: &str) -> Vec<DocketEntry> {
     let mut entries: Vec<DocketEntry> = Vec::new();
     for d in docs {
         let entry_number = d.get("entry_number").and_then(|x| x.as_u64());
@@ -1020,7 +1024,6 @@ fn entries_from_documents(docs: &[Value], court: &str, pacer_case_id: Option<&st
     }
     // Docket-sheet order: numbered entries ascending, unnumbered rows last.
     entries.sort_by_key(|e| (e.entry_number.is_none(), e.entry_number.unwrap_or(u64::MAX)));
-    let _ = pacer_case_id; // kept for symmetry with the docket-level PACER link
     entries
 }
 
@@ -1309,7 +1312,7 @@ mod tests {
             ]"#,
         )
         .expect("fixture parses");
-        let entries = entries_from_documents(&docs, "nysd", Some("605906"));
+        let entries = entries_from_documents(&docs, "nysd");
         assert_eq!(entries.len(), 3);
         // Numbered entries ascending, unnumbered last.
         assert_eq!(entries[0].entry_number, Some(1));

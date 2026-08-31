@@ -226,7 +226,7 @@ fn us_code_title_only(title: u32) -> StatuteResponse {
         "https://uscode.house.gov/browse/prelim@title{title}&edition=prelim"
     ));
     out.related_urls
-        .push(format!("https://www.govinfo.gov/app/collection/uscode"));
+        .push("https://www.govinfo.gov/app/collection/uscode".to_string());
     match out.heading.as_deref() {
         Some(name) => out.warnings.push(format!(
             "--title {title} is \"{name}\"; add --section for the statutory text (e.g. --title \
@@ -248,24 +248,15 @@ fn citation_of(title: u32, section: &str) -> String {
 
 /// Callers paste citations in every shape: "§ 78j", "Sec. 78j", "78j.".
 fn normalize_section(raw: &str) -> String {
-    let cleaned: String = raw
-        .trim()
-        .trim_start_matches('§')
-        .trim()
-        .trim_end_matches('.')
-        .to_string();
-    let lower = cleaned.to_ascii_lowercase();
-    let stripped = lower
-        .strip_prefix("sec.")
-        .or_else(|| lower.strip_prefix("sec "))
-        .or_else(|| lower.strip_prefix("section "))
-        .map(|_| {
-            // Preserve the original casing of the number itself.
-            let cut = cleaned.len() - cleaned.trim_start_matches(|c: char| c.is_ascii_alphabetic() || c == '.' || c == ' ').len();
-            cleaned[cut..].to_string()
-        })
-        .unwrap_or(cleaned);
-    stripped.trim().replace(' ', "")
+    let mut s = raw.trim().trim_start_matches('§').trim();
+    // Longest label first, or "sec" would eat the head of "section".
+    for label in ["sections", "section", "secs.", "sec.", "secs", "sec"] {
+        if s.get(..label.len()).is_some_and(|h| h.eq_ignore_ascii_case(label)) {
+            s = s[label.len()..].trim_start_matches(['.', ' ']).trim();
+            break;
+        }
+    }
+    s.trim_end_matches('.').replace(' ', "")
 }
 
 /// For US Code the section goes **in the path**. This is the opposite of the
@@ -862,6 +853,7 @@ mod tests {
         assert_eq!(normalize_section("Sec. 107"), "107");
         assert_eq!(normalize_section("1681a."), "1681a");
         assert_eq!(normalize_section("78j-1"), "78j-1");
+        assert_eq!(normalize_section("Section 1681a"), "1681a");
     }
 
     #[test]
@@ -938,10 +930,23 @@ mod tests {
         assert_eq!(id.number, 1720);
 
         assert_eq!(parse_bill_id("H.J.Res. 1").map(|i| i.code), Some("hjres"));
-        assert_eq!(parse_bill_id("sconres5").map(|i| i.govtrack_type), Some("senate_concurrent_resolution"));
+        assert_eq!(
+            parse_bill_id("sconres5").map(|i| i.govtrack_type),
+            Some("senate_concurrent_resolution")
+        );
         // Not a bill number — must fall through to a title search.
         assert!(parse_bill_id("postal service reform").is_none());
         assert!(parse_bill_id("xyz12").is_none());
+    }
+
+    #[test]
+    fn maps_govtrack_bill_types_back_to_bulkdata_codes() {
+        let hit = serde_json::json!({"bill_type": "senate_joint_resolution", "number": 33});
+        let id = bill_id_from_govtrack(&hit).expect("reverse mapping");
+        assert_eq!(id.code, "sjres");
+        assert_eq!(id.label, "S.J.Res.");
+        assert_eq!(id.number, 33);
+        assert!(bill_id_from_govtrack(&serde_json::json!({"number": 1})).is_none());
     }
 
     #[test]
