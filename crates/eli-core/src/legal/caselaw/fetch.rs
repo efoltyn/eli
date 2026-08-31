@@ -747,24 +747,37 @@ async fn web_text(out: &mut OpinionResponse, url: &str, max_chars: usize) {
 }
 
 /// One anonymous `/search/` call to fill in whatever the text sources could not.
+///
+/// The query is fielded (`citation:"…"`), not a free-text phrase. A phrase
+/// search for "597 U.S. 1" ranks every later decision that *quotes* Bruen above
+/// Bruen itself, and taking its top hit would silently answer with a different
+/// court, a different year and a different opinion id — a wrong answer wearing
+/// the right citation. Every hit is validated against the citation before any
+/// of it is merged, so a mis-ranked or unrelated result changes nothing.
 async fn search_fallback(
     out: &mut OpinionResponse,
     cite: &courtlistener::ParsedCite,
     max_chars: usize,
 ) {
-    let q = format!("\"{} {} {}\"", cite.volume, cite.reporter, cite.page);
+    let wanted = format!("{} {} {}", cite.volume, cite.reporter, cite.page);
     let path = format!(
         "search/?q={}&type=o&highlight=on",
-        urlencoding::encode(&q)
+        urlencoding::encode(&format!("citation:(\"{wanted}\")"))
     );
     let Some(v) = courtlistener::get(&path, &mut out.warnings).await else {
         return;
     };
-    let Some(hit) = v
-        .get("results")
-        .and_then(|r| r.as_array())
-        .and_then(|a| a.first())
-    else {
+    let results = v.get("results").and_then(|r| r.as_array());
+    let Some(hit) = results.and_then(|a| {
+        a.iter()
+            .find(|h| hit_is_the_cited_case(h, &wanted, out.cluster_id))
+    }) else {
+        if results.is_some_and(|a| !a.is_empty()) {
+            out.warnings.push(format!(
+                "the search index returned results for {wanted} but none of them *is* that \
+                 citation — they cite it. Nothing from them was used."
+            ));
+        }
         return;
     };
     let parsed = parse_hit(hit, "o");
@@ -797,6 +810,39 @@ async fn search_fallback(
 }
 
 // ── helpers ────────────────────────────────────────────────────────────────
+
+/// Is this search hit the decision published at `wanted`, rather than one that
+/// merely quotes it? The cluster id from the `/c/` resolver is the strongest
+/// signal; failing that, the hit has to carry the citation in its own
+/// `citation[]` array.
+fn hit_is_the_cited_case(
+    hit: &serde_json::Value,
+    wanted: &str,
+    expected_cluster: Option<u64>,
+) -> bool {
+    if let Some(expected) = expected_cluster {
+        if hit.get("cluster_id").and_then(|c| c.as_u64()) == Some(expected) {
+            return true;
+        }
+    }
+    let key = cite_key(wanted);
+    hit.get("citation")
+        .and_then(|c| c.as_array())
+        .is_some_and(|arr| {
+            arr.iter()
+                .filter_map(|c| c.as_str())
+                .any(|c| cite_key(c) == key)
+        })
+}
+
+/// Reporter punctuation varies ("597 U.S. 1" / "597 US 1"); compare on the
+/// alphanumerics only.
+fn cite_key(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_lowercase()
+}
 
 fn absolute(path: &str) -> String {
     if path.starts_with("http://") || path.starts_with("https://") {
@@ -984,6 +1030,33 @@ mod tests {
         let snippet = hit.snippet.expect("snippet");
         assert!(!snippet.contains("<mark>"), "{snippet}");
         assert!(snippet.starts_with("protected by qualified immunity"), "{snippet}");
+    }
+
+    #[test]
+    fn a_case_that_merely_quotes_the_citation_is_rejected() {
+        // The live failure this guards: a 2024 Ohio appeal that quotes Bruen
+        // ranked above Bruen itself on a phrase search, and merging it would
+        // have reported the wrong court, year and opinion id.
+        let quoting = serde_json::json!({
+            "caseName": "State v. Someone",
+            "cluster_id": 9999999,
+            "citation": ["2024 Ohio 5280"]
+        });
+        let real = serde_json::json!({
+            "caseName": "New York State Rifle & Pistol Assn., Inc. v. Bruen",
+            "cluster_id": 6480696,
+            "citation": ["597 U.S. 1", "142 S. Ct. 2111"]
+        });
+        assert!(!hit_is_the_cited_case(&quoting, "597 U.S. 1", None));
+        assert!(hit_is_the_cited_case(&real, "597 U.S. 1", None));
+        // The resolver's cluster id settles it even when the citation array is
+        // empty (very recent decisions have no reporter cite yet).
+        let bare = serde_json::json!({"cluster_id": 6480696, "citation": []});
+        assert!(hit_is_the_cited_case(&bare, "597 U.S. 1", Some(6480696)));
+        assert!(!hit_is_the_cited_case(&bare, "597 U.S. 1", Some(1)));
+        // Punctuation in the reporter must not decide it.
+        let loose = serde_json::json!({"citation": ["597 US 1"]});
+        assert!(hit_is_the_cited_case(&loose, "597 U.S. 1", None));
     }
 
     #[test]

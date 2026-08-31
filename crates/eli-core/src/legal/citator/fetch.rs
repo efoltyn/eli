@@ -9,9 +9,12 @@
 //!     302s to a real opinion and 404s on a reporter page that holds nothing.
 //!     No key, and it is outside the API throttle, which matters because
 //!     checking a whole brief is exactly the high-volume case.
-//!   * **Attribution.** The 302 target carries the real case name. A citation
-//!     that exists but resolves to a different case is the failure mode that
-//!     survives a spell-check and kills a filing.
+//!   * **Attribution.** The 302 target carries the real case name, which is
+//!     checked against the name the passage attached to the cite. A *real*
+//!     reporter page wearing an *invented* case name is the failure mode that
+//!     survives every existence check — `612 F.3d 1099` is a genuine page, but
+//!     it is *United States v. Maciel-Alcala*, not "Whitfield v. Marshall" —
+//!     and it is the one that survives a spell-check and kills a filing.
 //!   * **Ambiguity and normalisation.** With a token, `/citation-lookup/` adds
 //!     eyecite's parser: `576 US 644` normalises to `576 U.S. 644`, and
 //!     `1 H. 150` comes back three-ways ambiguous rather than confidently wrong.
@@ -70,7 +73,15 @@ pub struct CitationVerdict {
     /// 200 found, 404 no such case, 400 unrecognised reporter, 300 ambiguous,
     /// 429 not checked (throttled or over the batch cap), 0 unreachable.
     pub status: u16,
+    /// The resolved, authoritative case name.
     pub case_name: Option<String>,
+    /// The case name the *source text* attached to this cite, when it gave one.
+    /// Kept separately from `case_name` so the two can be compared rather than
+    /// one silently overwriting the other.
+    pub cited_as: Option<String>,
+    /// The reporter page is real but names a different decision than the text
+    /// claimed. Existence alone would have passed this citation.
+    pub name_mismatch: bool,
     pub court: Option<String>,
     pub date_filed: Option<String>,
     pub cluster_id: Option<u64>,
@@ -96,7 +107,13 @@ pub struct NetworkCase {
 pub struct CitationResponse {
     pub generated_at: DateTime<Utc>,
     pub checked: usize,
+    /// Exists *and* the case name matches. Only these are clean.
     pub verified: usize,
+    /// Exists, but under a different case name than the text gave it. Counted
+    /// apart from `verified` so a caller reading only the totals cannot
+    /// conclude a misattributed brief checks out.
+    pub misattributed: usize,
+    /// No case found at that reporter page, or the check could not be made.
     pub unverified: usize,
     pub citations: Vec<CitationVerdict>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -112,6 +129,7 @@ pub async fn fetch_citations(req: CitationRequest) -> Result<CitationResponse> {
         generated_at: Utc::now(),
         checked: 0,
         verified: 0,
+        misattributed: 0,
         unverified: 0,
         citations: Vec::new(),
         cited_by: Vec::new(),
@@ -131,10 +149,20 @@ pub async fn fetch_citations(req: CitationRequest) -> Result<CitationResponse> {
     }
 
     // What to verify. A single --cite is taken verbatim so the caller sees the
-    // verdict on the string they actually wrote, typos included.
-    let mut targets: Vec<String> = Vec::new();
+    // verdict on the string they actually wrote, typos included — but if they
+    // pasted the whole "Name v. Name, 1 U.S. 1" form, keep the name so the
+    // attribution check has something to compare against.
+    let mut targets: Vec<ExtractedCite> = Vec::new();
     if let Some(c) = single {
-        targets.push(c.to_string());
+        let mut parsed = extract_citations(c);
+        if parsed.len() == 1 {
+            targets.push(parsed.remove(0));
+        } else {
+            targets.push(ExtractedCite {
+                citation: c.to_string(),
+                cited_as: None,
+            });
+        }
     }
     if let Some(t) = text {
         if t.chars().count() > 64_000 {
@@ -161,7 +189,10 @@ pub async fn fetch_citations(req: CitationRequest) -> Result<CitationResponse> {
             ));
         }
         for c in found.into_iter().take(MAX_TEXT_CITES) {
-            if !targets.iter().any(|t| t.eq_ignore_ascii_case(&c)) {
+            if !targets
+                .iter()
+                .any(|t| compare_key(&t.citation) == compare_key(&c.citation))
+            {
                 targets.push(c);
             }
         }
@@ -170,8 +201,23 @@ pub async fn fetch_citations(req: CitationRequest) -> Result<CitationResponse> {
     if !targets.is_empty() {
         out.citations = verify(&targets, text, &mut out.warnings).await;
         out.checked = out.citations.len();
-        out.verified = out.citations.iter().filter(|v| v.exists).count();
-        out.unverified = out.checked - out.verified;
+        // A cite whose reporter page is real but whose case name is not must
+        // never land in `verified`: that bucket is what a caller reads to
+        // decide the passage is clean.
+        out.verified = out
+            .citations
+            .iter()
+            .filter(|v| v.exists && !v.name_mismatch)
+            .count();
+        out.misattributed = out.citations.iter().filter(|v| v.name_mismatch).count();
+        out.unverified = out.checked - out.verified - out.misattributed;
+        if out.misattributed > 0 {
+            out.warnings.push(format!(
+                "{} citation(s) point at a real reporter page but name a different case than the \
+                 text does. Those are counted under `misattributed`, not `verified`.",
+                out.misattributed
+            ));
+        }
     }
 
     if req.cited_by || req.authorities {
@@ -187,7 +233,7 @@ pub async fn fetch_citations(req: CitationRequest) -> Result<CitationResponse> {
 /// resolver for anything it did not cover. The resolver alone is a complete
 /// answer — the token is an upgrade, never a prerequisite.
 async fn verify(
-    targets: &[String],
+    targets: &[ExtractedCite],
     text: Option<&str>,
     warnings: &mut Vec<String>,
 ) -> Vec<CitationVerdict> {
@@ -197,7 +243,13 @@ async fn verify(
         // Posting the original passage rather than the extracted strings lets
         // eyecite do its own parsing, which catches forms this module's regex
         // deliberately does not chase.
-        let payload = text.map(str::to_string).unwrap_or_else(|| targets.join("; "));
+        let payload = text.map(str::to_string).unwrap_or_else(|| {
+            targets
+                .iter()
+                .map(|t| t.citation.as_str())
+                .collect::<Vec<_>>()
+                .join("; ")
+        });
         if let Some(results) = citation_lookup(&payload, warnings).await {
             for r in results {
                 verdicts.push(verdict_from_lookup(&r));
@@ -217,16 +269,63 @@ async fn verify(
     // token — goes through the resolver, one at a time with a pause.
     let mut first = verdicts.is_empty();
     for target in targets {
-        if verdicts.iter().any(|v| matches_citation(v, target)) {
+        if verdicts
+            .iter()
+            .any(|v| matches_citation(v, &target.citation))
+        {
             continue;
         }
         if !first {
             tokio::time::sleep(RESOLVER_DELAY).await;
         }
         first = false;
-        verdicts.push(resolve_one(target).await);
+        verdicts.push(resolve_one(&target.citation).await);
+    }
+
+    // Attribution pass, last so it covers verdicts from both paths: carry the
+    // name the text used onto the verdict, and compare it with the name the
+    // reporter page actually belongs to.
+    for v in verdicts.iter_mut() {
+        let Some(t) = targets
+            .iter()
+            .find(|t| matches_citation(v, &t.citation))
+            .or_else(|| targets.iter().find(|t| compare_key(&t.citation) == compare_key(&v.citation)))
+        else {
+            continue;
+        };
+        v.cited_as = t.cited_as.clone();
+        apply_attribution(v);
     }
     verdicts
+}
+
+/// Compare the name the passage gave a cite with the name the reporter page
+/// actually carries, and rewrite the verdict when they disagree.
+fn apply_attribution(v: &mut CitationVerdict) {
+    let (Some(cited_as), Some(resolved)) = (v.cited_as.as_deref(), v.case_name.as_deref()) else {
+        // No name in the text, or no resolved name: there is nothing to compare,
+        // and guessing a mismatch here would be worse than staying quiet.
+        return;
+    };
+    if !v.exists {
+        return;
+    }
+    if names_agree(cited_as, resolved) {
+        // Confirmed on both axes — say so, rather than leaving the generic
+        // "check the name yourself" caveat on a cite we already checked.
+        v.note = Some(format!(
+            "verified: the reporter page exists and resolves to {resolved}, which matches the              case name used in the text."
+        ));
+        return;
+    }
+    v.name_mismatch = true;
+    v.note = Some(format!(
+        "MISATTRIBUTED: {} is a real reporter page, but it is {resolved} — not \"{cited_as}\" as \
+         the text has it. The citation as written is wrong: either the case name was invented and \
+         bolted onto a real cite, or the volume/reporter/page belongs to a different decision. \
+         Existence alone would have passed this cite; the names are what caught it.",
+        v.normalized.as_deref().unwrap_or(&v.citation)
+    ));
 }
 
 /// Key-free verification of one citation string.
@@ -256,6 +355,9 @@ async fn resolve_one(raw: &str) -> CitationVerdict {
             let (id, name) = courtlistener::parse_opinion_url(&loc);
             v.exists = true;
             v.status = 200;
+            // The slug title-cases every word, so "v" arrives as "V" and
+            // particles as "Of"/"The". Render it the way a brief would.
+            let name = name.as_deref().map(tidy_case_name);
             // The redirect lands on the *cluster* page: web URLs on
             // CourtListener are cluster-scoped, and cluster ids and opinion ids
             // are different id spaces.
@@ -430,111 +532,201 @@ fn compare_key(s: &str) -> String {
 async fn network(req: &CitationRequest, out: &mut CitationResponse) {
     let limit = req.limit.clamp(1, 100);
 
-    // The network is keyed by *opinion* id. A resolved citation gives a cluster
-    // id, so when the caller passed a cite rather than an id we take the opinion
-    // id off the search hit for that citation.
-    let (opinion_id, cites_from_hit) = match req.opinion_id {
-        Some(id) => (Some(id), Vec::new()),
+    // The network is keyed by *opinion* id, and one decision is usually several
+    // opinions: the resolver's 302 lands on a *cluster* (majority plus every
+    // concurrence and dissent), and later courts cite whichever sub-opinion
+    // they relied on. Asking about one sub-opinion id would under-report or,
+    // for a case whose lead opinion is not first in the list, report zero. So
+    // we collect every opinion id in the cluster and ask about all of them.
+    let (opinion_ids, cites_from_hit) = match req.opinion_id {
+        Some(id) => (vec![id], Vec::new()),
         None => {
-            let cite = out
-                .citations
-                .iter()
-                .find(|c| c.exists)
-                .map(|c| c.normalized.clone().unwrap_or_else(|| c.citation.clone()));
-            match cite {
-                Some(c) => opinion_id_for_cite(&c, &mut out.warnings).await,
-                None => (None, Vec::new()),
+            let anchor = out.citations.iter().find(|c| c.exists);
+            match anchor {
+                Some(c) => {
+                    let cite = c.normalized.clone().unwrap_or_else(|| c.citation.clone());
+                    opinion_ids_for_cite(&cite, c.cluster_id, &mut out.warnings).await
+                }
+                None => (Vec::new(), Vec::new()),
             }
         }
     };
 
-    let Some(oid) = opinion_id else {
+    if opinion_ids.is_empty() {
         out.warnings.push(
             "citation network skipped: no opinion id. Pass --id, or a --cite that resolves to a \
-             case in the search index."
+             case in the search index. (Note the number in a CourtListener /opinion/<n>/ URL is a \
+             *cluster* id; the network is keyed by opinion id.)"
                 .to_string(),
         );
         return;
-    };
+    }
 
     if req.cited_by {
-        cited_by(oid, limit, out).await;
+        cited_by(&opinion_ids, limit, out).await;
     }
     if req.authorities {
-        authorities(oid, limit, cites_from_hit, out).await;
+        authorities(opinion_ids[0], limit, cites_from_hit, out).await;
     }
 }
 
-/// Resolve a citation to an opinion id (and its table of authorities as bare
-/// ids) with one anonymous search call.
-async fn opinion_id_for_cite(cite: &str, warnings: &mut Vec<String>) -> (Option<u64>, Vec<u64>) {
+/// Resolve a citation to every opinion id in its cluster (and the lead
+/// opinion's table of authorities as bare ids) with one anonymous search call.
+///
+/// `sibling_ids` on a `type=o` hit lists the whole cluster, which is what makes
+/// this reliable: `opinions[]` holds only the sub-documents that matched the
+/// query, so a query that matched a dissent would otherwise point the whole
+/// network walk at the dissent.
+async fn opinion_ids_for_cite(
+    cite: &str,
+    expected_cluster: Option<u64>,
+    warnings: &mut Vec<String>,
+) -> (Vec<u64>, Vec<u64>) {
+    // Fielded, not a free-text phrase: searching for "597 U.S. 1" as words
+    // ranks the hundreds of later decisions that *quote* Bruen above Bruen
+    // itself, and walking the network from one of those would report a leading
+    // precedent as barely cited. Every hit is checked again below.
     let path = format!(
         "search/?q={}&type=o",
-        urlencoding::encode(&format!("\"{cite}\""))
+        urlencoding::encode(&format!("citation:(\"{cite}\")"))
     );
     let Some(v) = courtlistener::get(&path, warnings).await else {
-        return (None, Vec::new());
+        return (Vec::new(), Vec::new());
     };
-    let Some(op) = v
-        .get("results")
-        .and_then(|r| r.as_array())
-        .and_then(|a| a.first())
-        .and_then(|r| r.get("opinions"))
-        .and_then(|o| o.as_array())
-        .and_then(|a| a.first())
-    else {
-        return (None, Vec::new());
+    let results = v.get("results").and_then(|r| r.as_array());
+    let Some(hit) = results.and_then(|a| {
+        a.iter()
+            .find(|h| hit_is_the_cited_case(h, cite, expected_cluster))
+    }) else {
+        warnings.push(format!(
+            "could not identify the opinion published at {cite} in the search index, so the \
+             citation network was not walked. Pass --id with a CourtListener opinion id to walk \
+             it directly."
+        ));
+        return (Vec::new(), Vec::new());
     };
-    let id = op.get("id").and_then(|x| x.as_u64());
-    let cites = op
-        .get("cites")
+    let (ids, cites) = opinion_ids_of_hit(hit);
+    if ids.is_empty() {
+        warnings.push(format!(
+            "found the case at {cite} but the search hit carried no opinion ids, so the citation \
+             network could not be walked"
+        ));
+    }
+    (ids, cites)
+}
+
+/// Is this hit the decision published at `wanted`, or one that merely cites it?
+fn hit_is_the_cited_case(
+    hit: &serde_json::Value,
+    wanted: &str,
+    expected_cluster: Option<u64>,
+) -> bool {
+    if let Some(expected) = expected_cluster {
+        if hit.get("cluster_id").and_then(|c| c.as_u64()) == Some(expected) {
+            return true;
+        }
+    }
+    let key = compare_key(wanted);
+    hit.get("citation")
         .and_then(|c| c.as_array())
-        .map(|a| a.iter().filter_map(|x| x.as_u64()).collect())
-        .unwrap_or_default();
-    (id, cites)
+        .is_some_and(|arr| {
+            arr.iter()
+                .filter_map(|c| c.as_str())
+                .any(|c| compare_key(c) == key)
+        })
+}
+
+/// Every opinion id a `type=o` search hit names, lead opinion first, plus that
+/// opinion's `cites[]`.
+fn opinion_ids_of_hit(hit: &serde_json::Value) -> (Vec<u64>, Vec<u64>) {
+    let mut ids: Vec<u64> = Vec::new();
+    let mut cites: Vec<u64> = Vec::new();
+    if let Some(ops) = hit.get("opinions").and_then(|o| o.as_array()) {
+        for op in ops {
+            if let Some(id) = op.get("id").and_then(|x| x.as_u64()) {
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+            if cites.is_empty() {
+                if let Some(arr) = op.get("cites").and_then(|c| c.as_array()) {
+                    cites = arr.iter().filter_map(|x| x.as_u64()).collect();
+                }
+            }
+        }
+    }
+    if let Some(sibs) = hit.get("sibling_ids").and_then(|s| s.as_array()) {
+        for id in sibs.iter().filter_map(|x| x.as_u64()) {
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+    }
+    (ids, cites)
 }
 
 /// Forward citations. `q=cites:(<opinion_id>)` is a fielded query over the same
 /// anonymous search index, so this is the one half of the graph that comes back
 /// with real case names without a token.
-async fn cited_by(opinion_id: u64, limit: usize, out: &mut CitationResponse) {
+async fn cited_by(opinion_ids: &[u64], limit: usize, out: &mut CitationResponse) {
+    let ids = opinion_ids
+        .iter()
+        .map(u64::to_string)
+        .collect::<Vec<_>>()
+        .join(" OR ");
     let mut path = format!(
         "search/?q={}&type=o&order_by={}",
-        urlencoding::encode(&format!("cites:({opinion_id})")),
+        urlencoding::encode(&format!("cites:({ids})")),
         urlencoding::encode("citeCount desc")
     );
     if limit > 20 {
         path.push_str(&format!("&page_size={limit}"));
     }
-    if let Some(v) = courtlistener::get(&path, &mut out.warnings).await {
-        out.cited_by_total = v.get("count").and_then(|c| c.as_u64());
-        if let Some(results) = v.get("results").and_then(|r| r.as_array()) {
-            for raw in results.iter().take(limit) {
-                out.cited_by.push(network_case(raw));
-            }
-        }
-    }
 
-    // With a token the join table gives the exact per-opinion figure; the
-    // search count is per-cluster and differs for multi-opinion clusters.
-    if courtlistener::has_token() {
+    // `answered` and not `count.is_some()`: a throttled or rejected request
+    // must leave `cited_by_total` null. Reporting 0 there would turn "we could
+    // not ask" into "nothing cites this case", which for a leading precedent is
+    // a confidently wrong answer rather than a thin one.
+    let answered = match courtlistener::get(&path, &mut out.warnings).await {
+        Some(v) => {
+            out.cited_by_total = v.get("count").and_then(|c| c.as_u64());
+            if let Some(results) = v.get("results").and_then(|r| r.as_array()) {
+                for raw in results.iter().take(limit) {
+                    out.cited_by.push(network_case(raw));
+                }
+            }
+            true
+        }
+        None => false,
+    };
+
+    // With a token the join table gives an exact per-opinion figure. Only worth
+    // spending a request when the search count is missing, and only meaningful
+    // for a single opinion — the search count is per-cluster, which is the
+    // number a reader actually wants for "who cites this case".
+    if out.cited_by_total.is_none() && courtlistener::has_token() && opinion_ids.len() == 1 {
         if let Some(v) = courtlistener::get(
-            &format!("opinions-cited/?cited_opinion={opinion_id}&count=on"),
+            &format!("opinions-cited/?cited_opinion={}&count=on", opinion_ids[0]),
             &mut out.warnings,
         )
         .await
         {
-            if let Some(n) = v.get("count").and_then(|c| c.as_u64()) {
-                out.cited_by_total = Some(n);
-            }
+            out.cited_by_total = v.get("count").and_then(|c| c.as_u64());
         }
     }
 
-    if out.cited_by.is_empty() && out.cited_by_total.unwrap_or(0) == 0 {
+    if !answered {
         out.warnings.push(format!(
-            "nothing found citing opinion {opinion_id}. Either it has not been cited, or the \
-             `cites:` field query was rejected — cross-check the case's citeCount on its \
-             CourtListener page before reporting it as uncited."
+            "the forward-citation query for opinion(s) {ids} did not complete, so cited_by_total \
+             is null rather than 0 — this is \"not asked\", not \"not cited\". Retry when the \
+             rate limit clears."
+        ));
+    } else if out.cited_by.is_empty() && out.cited_by_total.unwrap_or(0) == 0 {
+        out.warnings.push(format!(
+            "the search index reports nothing citing opinion(s) {ids}. Either the case has not \
+             been cited, or the `cites:` field query did not match the ids CourtListener indexes \
+             for it — cross-check citeCount on the case's CourtListener page before reporting it \
+             as uncited."
         ));
     }
 }
@@ -652,12 +844,48 @@ const NOT_REPORTERS: &[&str] = &[
 /// case-law corpus will always 404 them and the 404 would read as "fabricated".
 const NOT_CASE_REPORTERS: &[&str] = &["U.S.C.", "C.F.R.", "Stat.", "Fed. Reg.", "U.S.C.A.", "U.S.C.S."];
 
-/// Pull every citation-looking string out of free text, in order, deduped.
+/// The `Name v. Name,` run immediately before a cite.
+///
+/// Anchored at the end of the window so it can only match the party string
+/// that actually introduces this citation, not an earlier one in the sentence.
+/// Digits are outside every character class, which is what stops it running
+/// backwards across a preceding citation or year parenthetical.
+static PARTY_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
+    Regex::new(
+        r"([A-Z][A-Za-z.'&-]*(?:\s+[A-Za-z.'&-]+){0,6}\s+(?:v\.?|vs\.?|versus)\s+[A-Z][A-Za-z.'&-]*(?:\s+[A-Za-z.'&-]+){0,6}),\s*\z",
+    )
+    .ok()
+});
+
+/// A citation as it appeared in the source text, with the case name the text
+/// attached to it. The pairing is the whole point: verifying the number without
+/// the name passes an invented case bolted onto a real reporter page.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ExtractedCite {
+    pub citation: String,
+    pub cited_as: Option<String>,
+}
+
+/// Words that carry no identifying weight in a case name. Party-neutral
+/// boilerplate ("United States", "Inc.", "Board of"), citation signals that the
+/// backward scan can pick up ("See", "Cf."), and the connective itself.
+const NAME_NOISE: &[&str] = &[
+    "v", "vs", "versus", "the", "of", "in", "re", "ex", "rel", "et", "al", "and", "a", "an", "on",
+    "at", "to", "for", "inc", "llc", "llp", "lp", "co", "corp", "corporation", "company", "ltd",
+    "assn", "association", "comm", "commission", "commr", "commissioner", "sec", "secretary",
+    "dept", "department", "div", "bd", "board", "united", "states", "us", "usa", "america",
+    "american", "city", "county", "state", "town", "village", "district", "court", "no", "nos",
+    "see", "also", "cf", "eg", "ie", "accord", "but", "compare", "citing", "quoting", "contra",
+    "matter", "estate", "parte", "rem", "attorney", "general", "director", "warden", "sheriff",
+];
+
+/// Pull every citation-looking string out of free text, in order, deduped,
+/// each paired with the case name the text gave it.
 ///
 /// Deliberately structural rather than clever: it finds the shape and lets the
 /// resolver decide what is real. Missing a cite is a smaller harm than
 /// pre-filtering away the fabricated one the user needed to catch.
-pub(crate) fn extract_citations(text: &str) -> Vec<String> {
+pub(crate) fn extract_citations(text: &str) -> Vec<ExtractedCite> {
     // Markup in a pasted brief would otherwise split a reporter across a tag.
     let flat = if text.contains('<') {
         strip_markup(text)
@@ -668,7 +896,7 @@ pub(crate) fn extract_citations(text: &str) -> Vec<String> {
         return Vec::new();
     };
 
-    let mut out: Vec<String> = Vec::new();
+    let mut out: Vec<ExtractedCite> = Vec::new();
     let mut seen: Vec<String> = Vec::new();
     for caps in re.captures_iter(&flat) {
         let (Some(vol), Some(rep), Some(page)) =
@@ -686,9 +914,98 @@ pub(crate) fn extract_citations(text: &str) -> Vec<String> {
             continue;
         }
         seen.push(key);
-        out.push(cite);
+        out.push(ExtractedCite {
+            cited_as: preceding_case_name(&flat[..vol.start()]),
+            citation: cite,
+        });
     }
     out
+}
+
+/// Read the party string out of the text immediately before a citation.
+fn preceding_case_name(before: &str) -> Option<String> {
+    let re = PARTY_RE.as_ref()?;
+    // A window, so a name several sentences back cannot be dragged forward.
+    let start = before
+        .char_indices()
+        .rev()
+        .take(200)
+        .last()
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+    let name = re.captures(&before[start..])?.get(1)?.as_str().trim();
+    // Trim the citation signal the backward scan swept up ("See Nken v.
+    // Holder" -> "Nken v. Holder"); it is not part of the case name.
+    let mut words: Vec<&str> = name.split_whitespace().collect();
+    while words.len() > 2 {
+        let head = words[0].trim_matches(|c: char| !c.is_alphanumeric());
+        if NAME_NOISE.iter().any(|n| n.eq_ignore_ascii_case(head)) && !words[1].eq_ignore_ascii_case("v.") {
+            words.remove(0);
+        } else {
+            break;
+        }
+    }
+    let cleaned = words.join(" ");
+    (!cleaned.is_empty()).then_some(cleaned)
+}
+
+/// Title-case a slug-derived name the way a citation would be written:
+/// "Nken V Holder" -> "Nken v. Holder", "In Re Marriage Of Bonds" ->
+/// "In re Marriage of Bonds".
+fn tidy_case_name(raw: &str) -> String {
+    const PARTICLES: &[&str] = &[
+        "of", "the", "and", "in", "re", "ex", "rel", "a", "an", "for", "on", "at", "to", "de",
+        "van", "von", "der", "el", "la", "et", "al", "as",
+    ];
+    raw.split_whitespace()
+        .enumerate()
+        .map(|(i, w)| {
+            if w.eq_ignore_ascii_case("v") {
+                return "v.".to_string();
+            }
+            let lower = w.to_ascii_lowercase();
+            if i > 0 && PARTICLES.contains(&lower.as_str()) {
+                return lower;
+            }
+            w.to_string()
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Identifying words in a case name: lowercased, depunctuated, with the
+/// boilerplate that every other caption shares removed.
+fn name_tokens(name: &str) -> Vec<String> {
+    name.split(|c: char| !c.is_alphanumeric() && c != '\'')
+        .map(|w| {
+            w.chars()
+                .filter(|c| c.is_ascii_alphanumeric())
+                .collect::<String>()
+                .to_ascii_lowercase()
+        })
+        .filter(|w| w.len() > 1 && !NAME_NOISE.contains(&w.as_str()))
+        .collect()
+}
+
+/// Do two case names plausibly denote the same decision?
+///
+/// Loose on purpose. Reporters, slugs and briefs disagree about punctuation,
+/// abbreviation and which party gets named first, and a case can be recaptioned
+/// on appeal — so any shared identifying surname counts as agreement. What we
+/// are hunting is the case with *no* overlap at all ("Whitfield v. Marshall"
+/// against "United States v. Maciel-Alcala"), which is the shape of an invented
+/// name. When either side reduces to nothing but boilerplate there is no
+/// evidence either way, and we do not accuse.
+fn names_agree(cited_as: &str, resolved: &str) -> bool {
+    let a = name_tokens(cited_as);
+    let b = name_tokens(resolved);
+    if a.is_empty() || b.is_empty() {
+        return true;
+    }
+    a.iter().any(|x| {
+        b.iter()
+            .any(|y| x == y || (x.len() >= 5 && y.len() >= 5 && (x.starts_with(y) || y.starts_with(x))))
+    })
 }
 
 fn plausible_reporter(reporter: &str) -> bool {
@@ -732,14 +1049,21 @@ fn last_path_id(uri: &str) -> Option<u64> {
 mod tests {
     use super::*;
 
+    /// Just the citation strings, for the tests that do not care about names.
+    fn cites(text: &str) -> Vec<String> {
+        extract_citations(text)
+            .into_iter()
+            .map(|c| c.citation)
+            .collect()
+    }
+
     #[test]
     fn extracts_citations_from_a_paragraph() {
         let text = "See Nken v. Holder, 556 U.S. 418 (2009); Whitfield v. Marshall, \
                     612 F.3d 1099, 1104 (9th Cir. 2010). The court also relied on \
                     Doe v. Roe, 999 U.S. 999 (2021), and on 458 F. Supp. 2d 231 (S.D.N.Y. 2006).";
-        let found = extract_citations(text);
         assert_eq!(
-            found,
+            cites(text),
             vec![
                 "556 U.S. 418",
                 "612 F.3d 1099",
@@ -752,30 +1076,147 @@ mod tests {
     }
 
     #[test]
+    fn captures_the_case_name_the_text_attached_to_each_cite() {
+        let text = "See Nken v. Holder, 556 U.S. 418 (2009); Whitfield v. Marshall, \
+                    612 F.3d 1099 (9th Cir. 2010). And 458 F. Supp. 2d 231 (S.D.N.Y. 2006).";
+        let found = extract_citations(text);
+        // The "See" signal is stripped; the party string is not.
+        assert_eq!(found[0].cited_as.as_deref(), Some("Nken v. Holder"));
+        assert_eq!(found[1].cited_as.as_deref(), Some("Whitfield v. Marshall"));
+        // A bare cite with no caption in front of it gets no name — and must
+        // therefore never be accused of misattribution.
+        assert_eq!(found[2].cited_as, None);
+    }
+
+    #[test]
     fn a_pincite_does_not_become_a_second_citation() {
         // "612 F.3d 1099, 1104" must yield one cite at page 1099, never a
         // phantom cite at the pincite page.
-        let found = extract_citations("612 F.3d 1099, 1104 (9th Cir. 2010)");
-        assert_eq!(found, vec!["612 F.3d 1099"]);
+        assert_eq!(cites("612 F.3d 1099, 1104 (9th Cir. 2010)"), vec!["612 F.3d 1099"]);
     }
 
     #[test]
     fn duplicate_and_non_canonical_forms_collapse() {
-        let found = extract_citations("576 U.S. 644, then again 576 U.S. 644, and 576 US 644.");
-        assert_eq!(found, vec!["576 U.S. 644"]);
+        assert_eq!(
+            cites("576 U.S. 644, then again 576 U.S. 644, and 576 US 644."),
+            vec!["576 U.S. 644"]
+        );
     }
 
     #[test]
     fn ignores_dates_headings_and_statutes() {
-        assert!(extract_citations("filed 5 January 2020 in this court").is_empty());
-        assert!(extract_citations("see 3 Article 7 of the treaty").is_empty());
-        assert!(extract_citations("violates 15 U.S.C. 78j and 17 C.F.R. 240").is_empty());
+        assert!(cites("filed 5 January 2020 in this court").is_empty());
+        assert!(cites("see 3 Article 7 of the treaty").is_empty());
+        assert!(cites("violates 15 U.S.C. 78j and 17 C.F.R. 240").is_empty());
     }
 
     #[test]
     fn finds_citations_inside_pasted_markup() {
         let html = "<p>See <i>Roe v. Wade</i>, 410 U.S. 113 (1973).</p>";
-        assert_eq!(extract_citations(html), vec!["410 U.S. 113"]);
+        assert_eq!(cites(html), vec!["410 U.S. 113"]);
+    }
+
+    #[test]
+    fn slug_names_are_rendered_the_way_a_brief_writes_them() {
+        assert_eq!(tidy_case_name("Nken V Holder"), "Nken v. Holder");
+        assert_eq!(
+            tidy_case_name("In Re Marriage Of Bonds"),
+            "In re Marriage of Bonds"
+        );
+        assert_eq!(
+            tidy_case_name("United States V Maciel Alcala"),
+            "United States v. Maciel Alcala"
+        );
+    }
+
+    #[test]
+    fn an_invented_case_name_on_a_real_cite_is_a_mismatch() {
+        // The failure this tool exists for: 612 F.3d 1099 is a genuine page,
+        // but it is not the case the passage said it was.
+        assert!(!names_agree(
+            "Whitfield v. Marshall",
+            "United States v. Maciel-Alcala"
+        ));
+    }
+
+    #[test]
+    fn formatting_noise_is_not_a_mismatch() {
+        assert!(names_agree("Nken v. Holder", "Nken v. Holder"));
+        assert!(names_agree("Nken v. Holder", "Nken V Holder"));
+        assert!(names_agree(
+            "Roe v. Wade",
+            "Roe et al. v. Wade, District Attorney of Dallas County"
+        ));
+        // Recaptioned on appeal — one shared party is enough to keep quiet.
+        assert!(names_agree("Nken v. Mukasey", "Nken v. Holder"));
+        // Corporate suffixes and "United States" carry no identifying weight.
+        assert!(names_agree("Alice Corp. v. CLS Bank Int'l", "Alice Corporation Pty v. CLS Bank"));
+    }
+
+    #[test]
+    fn a_name_made_only_of_boilerplate_is_never_accused() {
+        // Nothing identifying on one side means no evidence either way.
+        assert!(names_agree("United States v. United States", "Smith v. Jones"));
+        assert!(names_agree("", "Nken v. Holder"));
+    }
+
+    #[test]
+    fn attribution_is_skipped_when_the_text_gave_no_name() {
+        let mut v = CitationVerdict {
+            citation: "612 F.3d 1099".into(),
+            exists: true,
+            status: 200,
+            case_name: Some("United States v. Maciel-Alcala".into()),
+            cited_as: None,
+            ..Default::default()
+        };
+        apply_attribution(&mut v);
+        assert!(!v.name_mismatch);
+    }
+
+    #[test]
+    fn a_misattributed_cite_says_so_and_leaves_the_verified_bucket() {
+        let mut verdicts = vec![
+            CitationVerdict {
+                citation: "556 U.S. 418".into(),
+                exists: true,
+                status: 200,
+                case_name: Some("Nken v. Holder".into()),
+                cited_as: Some("Nken v. Holder".into()),
+                ..Default::default()
+            },
+            CitationVerdict {
+                citation: "612 F.3d 1099".into(),
+                normalized: Some("612 F.3d 1099".into()),
+                exists: true,
+                status: 200,
+                case_name: Some("United States v. Maciel-Alcala".into()),
+                cited_as: Some("Whitfield v. Marshall".into()),
+                ..Default::default()
+            },
+            CitationVerdict {
+                citation: "999 U.S. 999".into(),
+                exists: false,
+                status: 404,
+                ..Default::default()
+            },
+        ];
+        for v in verdicts.iter_mut() {
+            apply_attribution(v);
+        }
+        assert!(!verdicts[0].name_mismatch);
+        assert!(verdicts[1].name_mismatch);
+        let note = verdicts[1].note.clone().expect("note");
+        assert!(note.contains("MISATTRIBUTED"), "{note}");
+        assert!(note.contains("United States v. Maciel-Alcala"), "{note}");
+        assert!(note.contains("Whitfield v. Marshall"), "{note}");
+
+        // The arithmetic the caller reads: 3 checked, exactly 1 clean.
+        let checked = verdicts.len();
+        let verified = verdicts.iter().filter(|v| v.exists && !v.name_mismatch).count();
+        let misattributed = verdicts.iter().filter(|v| v.name_mismatch).count();
+        assert_eq!((checked, verified, misattributed), (3, 1, 1));
+        assert_eq!(checked - verified - misattributed, 1);
     }
 
     #[test]
@@ -859,6 +1300,38 @@ mod tests {
             "https://www.courtlistener.com/opinion/145884/nken-v-holder/"
         );
         assert_eq!(last_path_id("https://x/api/rest/v4/opinions/10008139/"), Some(10008139));
+    }
+
+    #[test]
+    fn the_network_anchor_is_the_cited_case_not_a_case_that_quotes_it() {
+        let quoting = serde_json::json!({"cluster_id": 9999999, "citation": ["2024 Ohio 5280"]});
+        let real = serde_json::json!({"cluster_id": 6480696, "citation": ["597 U.S. 1"]});
+        assert!(!hit_is_the_cited_case(&quoting, "597 U.S. 1", None));
+        assert!(hit_is_the_cited_case(&real, "597 U.S. 1", None));
+        // The /c/ resolver's cluster id is authoritative when the hit carries
+        // no reporter citation of its own.
+        let bare = serde_json::json!({"cluster_id": 6480696, "citation": []});
+        assert!(hit_is_the_cited_case(&bare, "597 U.S. 1", Some(6480696)));
+        assert!(!hit_is_the_cited_case(&bare, "597 U.S. 1", Some(7)));
+    }
+
+    #[test]
+    fn every_opinion_in_the_cluster_is_walked_not_just_the_matching_one() {
+        // Bruen's shape: the query matched a concurrence, but `sibling_ids`
+        // names the whole cluster. Asking `cites:` about only the matched
+        // sub-opinion would report a leading precedent as uncited.
+        let hit = serde_json::json!({
+            "cluster_id": 6480696,
+            "sibling_ids": [10742983, 6480696, 10742984],
+            "opinions": [{"id": 10742983, "cites": [111, 222]}]
+        });
+        let (ids, cites) = opinion_ids_of_hit(&hit);
+        assert_eq!(ids, vec![10742983, 6480696, 10742984]);
+        assert_eq!(cites, vec![111, 222]);
+
+        // No ids at all is an empty answer, never a bogus zero.
+        let (ids, _) = opinion_ids_of_hit(&serde_json::json!({"cluster_id": 1}));
+        assert!(ids.is_empty());
     }
 
     #[test]

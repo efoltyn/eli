@@ -93,9 +93,10 @@ pub struct LegalDocketArgs {
     /// Free-text search over docket case names instead of an exact number.
     #[arg(long)]
     pub q: Option<String>,
-    /// Include the docket sheet entries (default true).
-    #[arg(long, default_value_t = true)]
-    pub entries: bool,
+    /// Skip the docket sheet entries and return only the case metadata.
+    /// Entries are included by default — they are the reason to call this.
+    #[arg(long, default_value_t = false)]
+    pub no_entries: bool,
     /// Max docket entries to return (default 50).
     #[arg(long, default_value = "50")]
     pub limit: usize,

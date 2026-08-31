@@ -163,12 +163,18 @@ async fn with_key(req: &CommentsRequest, key: &str, out: &mut CommentsResponse) 
     // documents, read their objectIds, then list comments on those.
     let mut object_ids: Vec<(String, String)> = Vec::new();
     if let Some(docket) = req.docket.as_deref() {
-        object_ids = docket_comment_targets(docket, key, out).await;
+        let (targets, reached) = docket_comment_targets(docket, key, out).await;
+        object_ids = targets;
         if object_ids.is_empty() {
-            out.warnings.push(format!(
-                "regulations.gov: docket {docket} has no document with a commentable objectId — \
-                 check the docket id, or search with --q instead"
-            ));
+            // Only claim the docket is empty when we actually got an answer;
+            // otherwise `soft_fail` has already said what went wrong and a
+            // second "no such docket" line would misattribute the cause.
+            if reached {
+                out.warnings.push(format!(
+                    "regulations.gov: docket {docket} has no document with a commentable objectId \
+                     — check the docket id, or search with --q instead"
+                ));
+            }
             return;
         }
     }
@@ -184,10 +190,10 @@ async fn with_key(req: &CommentsRequest, key: &str, out: &mut CommentsResponse) 
 
     let mut urls: Vec<String> = Vec::new();
     if object_ids.is_empty() {
-        urls.push(comments_url(req, None, page_size, key.len()));
+        urls.push(comments_url(req, None, page_size));
     } else {
         for (_doc_id, object_id) in object_ids.iter().take(MAX_COMMENT_TARGETS) {
-            urls.push(comments_url(req, Some(object_id), page_size, key.len()));
+            urls.push(comments_url(req, Some(object_id), page_size));
         }
     }
     out.source_url = urls.first().cloned();
@@ -248,15 +254,10 @@ async fn with_key(req: &CommentsRequest, key: &str, out: &mut CommentsResponse) 
     }
 }
 
-/// Build a `/comments` list URL. `key_len` is unused except to keep the key out
-/// of the returned string — the key goes in the `X-Api-Key` header, never in
-/// `source_url`, which we hand back to the caller verbatim.
-fn comments_url(
-    req: &CommentsRequest,
-    comment_on_id: Option<&str>,
-    page_size: usize,
-    _key_len: usize,
-) -> String {
+/// Build a `/comments` list URL. Note what is *not* in it: the key goes in the
+/// `X-Api-Key` header, never the query string, because `source_url` is handed
+/// back to the caller verbatim and ends up in logs and transcripts.
+fn comments_url(req: &CommentsRequest, comment_on_id: Option<&str>, page_size: usize) -> String {
     let mut url = format!("{REGS_BASE}/comments?page%5Bsize%5D={page_size}&sort=-postedDate");
     if let Some(oid) = comment_on_id {
         url.push_str(&format!(
@@ -283,18 +284,20 @@ fn comments_url(
 }
 
 /// List a docket's documents and return `(documentId, objectId)` for the ones
-/// worth chasing comments on, most recent first.
+/// worth chasing comments on, most recent first. The second tuple element says
+/// whether the upstream actually answered, so an empty list can be told apart
+/// from a failed request.
 async fn docket_comment_targets(
     docket: &str,
     key: &str,
     out: &mut CommentsResponse,
-) -> Vec<(String, String)> {
+) -> (Vec<(String, String)>, bool) {
     let url = format!(
         "{REGS_BASE}/documents?filter%5BdocketId%5D={}&page%5Bsize%5D=25&sort=-postedDate",
         urlencoding::encode(docket)
     );
     let Some(v) = regs_get(&url, key, "regulations.gov documents", &mut out.warnings).await else {
-        return Vec::new();
+        return (Vec::new(), false);
     };
     let mut targets: Vec<(String, String)> = Vec::new();
     if let Some(arr) = v.get("data").and_then(|d| d.as_array()) {
@@ -319,7 +322,7 @@ async fn docket_comment_targets(
             }
         }
     }
-    targets
+    (targets, true)
 }
 
 /// `--text`: pull each comment's detail record for the body, submitter and
@@ -332,7 +335,6 @@ async fn hydrate_details(out: &mut CommentsResponse, key: &str) {
         .comments
         .iter()
         .filter_map(|c| c.id.clone())
-        .filter(|_| true)
         .collect();
 
     let mut details: Vec<(String, serde_json::Value)> = Vec::new();
@@ -657,15 +659,21 @@ async fn fr_term_record(query: &str, req: &CommentsRequest, out: &mut CommentsRe
 
 fn absorb_fr_results(v: &serde_json::Value, req: &CommentsRequest, out: &mut CommentsResponse) {
     let mut counted: u64 = 0;
+    // A docket with zero comments filed is a real, useful answer ("nobody has
+    // weighed in yet"), so distinguish "reported 0" from "nobody reported".
+    let mut reported = false;
     if let Some(arr) = v.get("results").and_then(|r| r.as_array()) {
         for doc in arr.iter().take(req.limit) {
-            counted += fr_comment_count(doc).unwrap_or(0);
+            if let Some(c) = fr_comment_count(doc) {
+                counted += c;
+                reported = true;
+            }
             if let Some(rec) = fr_to_record(doc) {
                 out.comments.push(rec);
             }
         }
     }
-    if counted > 0 {
+    if reported {
         out.total_available = Some(counted);
     }
 }
@@ -1065,7 +1073,7 @@ mod tests {
             with_text: false,
             limit: 25,
         };
-        let url = comments_url(&req, Some("0900006483a6cba3"), 25, 40);
+        let url = comments_url(&req, Some("0900006483a6cba3"), 25);
         assert!(url.contains("filter%5BcommentOnId%5D=0900006483a6cba3"), "{url}");
         assert!(url.contains("filter%5BsearchTerm%5D=crypto%20custody"), "{url}");
         assert!(url.contains("filter%5BpostedDate%5D%5Bge%5D=2026-01-01"), "{url}");

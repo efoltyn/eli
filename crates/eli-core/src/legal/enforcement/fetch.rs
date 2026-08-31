@@ -807,7 +807,10 @@ fn clean_party(p: &str) -> String {
             break;
         }
     }
-    s.trim().trim_end_matches([',', '.', ';']).trim().to_string()
+    // Trailing commas and semicolons are list punctuation; a trailing period
+    // is not — it belongs to "Corp." and "Inc." and dropping it renames the
+    // party.
+    s.trim().trim_end_matches([',', ';']).trim().to_string()
 }
 
 #[cfg(test)]
@@ -874,7 +877,7 @@ mod tests {
         );
         assert_eq!(
             extract_respondents("In the Matter of ERHC Energy, Inc.", true),
-            vec!["ERHC Energy, Inc".to_string()]
+            vec!["ERHC Energy, Inc.".to_string()]
         );
         assert_eq!(
             extract_respondents("United States v. Acme Holdings LLC", false),
@@ -882,7 +885,7 @@ mod tests {
         );
         assert_eq!(
             extract_respondents("Ichcoin Tech Corp.", true),
-            vec!["Ichcoin Tech Corp".to_string()]
+            vec!["Ichcoin Tech Corp.".to_string()]
         );
         assert_eq!(
             extract_respondents("Stephen E. Buyer, et al.", true),
@@ -919,9 +922,9 @@ mod tests {
         assert_eq!(
             extract_respondents("SEC v. Alpha Corp., Beta Corp., and Gamma Corp.", true),
             vec![
-                "Alpha Corp".to_string(),
-                "Beta Corp".to_string(),
-                "Gamma Corp".to_string()
+                "Alpha Corp.".to_string(),
+                "Beta Corp.".to_string(),
+                "Gamma Corp.".to_string()
             ]
         );
         // A bare " and " may be part of one name — do not split it.

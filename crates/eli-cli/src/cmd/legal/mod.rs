@@ -78,7 +78,7 @@ async fn cmd_legal_docket(args: LegalDocketArgs) -> Result<()> {
         docket_number: args.number,
         docket_id: args.id,
         query: args.q,
-        include_entries: args.entries,
+        include_entries: !args.no_entries,
         limit: args.limit.clamp(1, 500),
         offset: args.offset.unwrap_or(0),
     };

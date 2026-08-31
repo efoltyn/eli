@@ -1546,8 +1546,11 @@ fn mcp_build_summary(tool: &str, output: &str) -> String {
                     lines.push(format!("#{n}|{date}|{desc}"));
                 }
             }
+            // Which upstream answered decides how much to trust `entry_count`:
+            // the key-free RECAP path reports only what search indexed.
+            let source = v.get("source").and_then(|x| x.as_str()).unwrap_or("?");
             format!(
-                "\"case_name\":\"{}\",\"court\":\"{court}\",\"docket_number\":\"{number}\",\"entry_count\":{total},\"entries_returned\":{returned},\"_schema\":\".entries[].{{entry_number,date_filed,description,documents[]}}\",\"docket\":[{}]",
+                "\"case_name\":\"{}\",\"court\":\"{court}\",\"docket_number\":\"{number}\",\"source\":\"{source}\",\"entry_count\":{total},\"entries_returned\":{returned},\"_schema\":\".entries[].{{entry_number,date_filed,description,documents[]}}\",\"docket\":[{}]",
                 name.replace('"', "'"),
                 lines.iter().map(|l| format!("\"{}\"", l.replace('"', "'"))).collect::<Vec<_>>().join(",")
             )
@@ -2665,7 +2668,7 @@ fn mcp_build_cli_args(tool: &str, args: &serde_json::Value) -> anyhow::Result<Ve
                 }
             }
             if args.get("entries").and_then(|x| x.as_bool()) == Some(false) {
-                v.extend([s("--entries"), s("false")]);
+                v.push(s("--no-entries"));
             }
             Ok(v)
         }

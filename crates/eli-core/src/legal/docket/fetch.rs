@@ -280,13 +280,13 @@ async fn scotus_docket(key: &str, req: &DocketRequest, out: &mut DocketResponse)
         .cloned()
         .unwrap_or_default();
     out.entry_count = proceedings.len();
+    // Metadata, not an entry — compute it before the include_entries gate so
+    // --no-entries still reports whether the case is closed.
+    out.date_terminated = scotus_terminated(&proceedings);
 
     if !req.include_entries {
         return;
     }
-    // Last proceeding line is the closest thing to a termination date; only
-    // trust it once the case is plainly over.
-    out.date_terminated = scotus_terminated(&proceedings);
 
     let (start, end) = page_window(proceedings.len(), req.offset, req.limit);
     for (idx, p) in proceedings[start..end].iter().enumerate() {
@@ -379,15 +379,24 @@ fn scotus_lower_court(v: &Value) -> Option<String> {
 
 /// A SCOTUS docket closes with judgment/mandate language; anything else means
 /// the case is still live, so we return None rather than guessing.
+///
+/// Scanned from the end rather than read off the last row, because clerical
+/// entries (fee refunds, corrected filings) routinely trail the judgment.
 fn scotus_terminated(proceedings: &[Value]) -> Option<String> {
-    let last = proceedings.last()?;
-    let text = str_of(last, "Text")?.to_ascii_lowercase();
-    let closing = ["judgment issued", "mandate issued", "case removed from the docket"];
-    closing
-        .iter()
-        .any(|k| text.contains(k))
-        .then(|| str_of(last, "Date").and_then(|d| iso_date(&d)))
-        .flatten()
+    const CLOSING: [&str; 4] = [
+        "judgment issued",
+        "mandate issued",
+        "case removed from the docket",
+        "petition denied",
+    ];
+    proceedings.iter().rev().find_map(|p| {
+        let text = str_of(p, "Text")?.to_ascii_lowercase();
+        CLOSING
+            .iter()
+            .any(|k| text.contains(k))
+            .then(|| str_of(p, "Date").and_then(|d| iso_date(&d)))
+            .flatten()
+    })
 }
 
 // ── CourtListener: by docket id ────────────────────────────────────────────
@@ -583,7 +592,11 @@ async fn adopt(c: &Candidate, req: &DocketRequest, out: &mut DocketResponse) {
     out.cause = c.cause.clone();
     out.assigned_to = c.assigned_to.clone();
     out.jury_demand = c.jury_demand.clone();
-    out.url = c.absolute_url.clone();
+    // Prefer the CourtListener docket page (free to read); fall back to the
+    // court's own ECF report, which is what `pacer_case_id` addresses.
+    out.url = c.absolute_url.clone().or_else(|| {
+        pacer_docket_url(c.court.as_deref().unwrap_or(""), c.pacer_case_id.as_deref())
+    });
 
     if !req.include_entries {
         return;
@@ -610,7 +623,6 @@ async fn adopt(c: &Candidate, req: &DocketRequest, out: &mut DocketResponse) {
 /// warning below says so rather than letting it masquerade as an entry total.
 async fn search_entries(id: u64, c: &Candidate, req: &DocketRequest, out: &mut DocketResponse) {
     let court = c.court.clone().unwrap_or_default();
-    let pacer_case_id = c.pacer_case_id.clone();
     let mut path = format!(
         "search/?type=rd&q={}&order_by=entry_date_filed%20asc",
         urlencoding::encode(&format!("docket_id:{id}"))
@@ -864,6 +876,7 @@ impl Candidate {
             "nature_of_suit": self.nature_of_suit,
             "max_entry_number_seen": self.max_entry_number,
             "url": self.absolute_url,
+            "pacer_case_id": self.pacer_case_id,
         })
     }
 }
@@ -1052,6 +1065,19 @@ fn pacer_doc_url(court: &str, pacer_doc_id: Option<&str>) -> Option<String> {
         return None;
     }
     Some(format!("https://ecf.{court}.uscourts.gov/doc1/{id}"))
+}
+
+/// The court's own ECF docket report. Behind a PACER login and metered per
+/// page, so it is a last-resort link, never the primary one.
+fn pacer_docket_url(court: &str, pacer_case_id: Option<&str>) -> Option<String> {
+    let id = pacer_case_id?.trim();
+    let court = court.trim().to_ascii_lowercase();
+    if id.is_empty() || court.is_empty() || court == "scotus" {
+        return None;
+    }
+    Some(format!(
+        "https://ecf.{court}.uscourts.gov/cgi-bin/DktRpt.pl?{id}"
+    ))
 }
 
 fn absolute_cl_url(path: &str) -> String {
@@ -1244,6 +1270,11 @@ mod tests {
         assert_eq!(pacer_doc_url("nysd", None), None);
         // SCOTUS is not on PACER at all.
         assert_eq!(pacer_doc_url("scotus", Some("1")), None);
+        assert_eq!(
+            pacer_docket_url("nysd", Some("605906")).as_deref(),
+            Some("https://ecf.nysd.uscourts.gov/cgi-bin/DktRpt.pl?605906")
+        );
+        assert_eq!(pacer_docket_url("scotus", Some("605906")), None);
     }
 
     #[test]
