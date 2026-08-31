@@ -310,6 +310,15 @@ async fn history(title: u32, req: &CfrRequest) -> Result<CfrResponse> {
         }
     }
 
+    // eCFR emits the same amendment more than once — typically an editorial
+    // re-issue alongside the substantive row, differing only in issue_date. Left
+    // in, a count of "how many times did this part change" is inflated several
+    // fold. Dedupe on (identifier, date), preferring the substantive row.
+    out.amendments
+        .sort_by(|a, b| (&a.identifier, &a.date, !a.substantive).cmp(&(&b.identifier, &b.date, !b.substantive)));
+    out.amendments
+        .dedup_by(|a, b| a.identifier == b.identifier && a.date == b.date);
+
     // Newest first — "when did this last change?" is the common question.
     out.amendments.sort_by(|a, b| b.date.cmp(&a.date));
     out.citation = Some(citation_of(title, part.as_deref(), req.section.as_deref()));
@@ -626,6 +635,40 @@ mod tests {
         let d = resolve_date(Some("2005-01-01"), &mut w).expect("still resolves");
         assert_eq!(d, "2005-01-01");
         assert!(w.iter().any(|x| x.contains("coverage starts")));
+    }
+
+    #[test]
+    fn dedupes_reissued_amendments_keeping_the_substantive_row() {
+        let mut rows = vec![
+            amendment("240.10b5-1", "2023-02-27", false),
+            amendment("240.10b5-1", "2023-02-27", true),
+            amendment("240.10b5-1", "2022-12-14", true),
+            amendment("240.10b-5", "2023-02-27", true),
+        ];
+        rows.sort_by(|a, b| {
+            (&a.identifier, &a.date, !a.substantive).cmp(&(&b.identifier, &b.date, !b.substantive))
+        });
+        rows.dedup_by(|a, b| a.identifier == b.identifier && a.date == b.date);
+        assert_eq!(rows.len(), 3);
+        let kept = rows
+            .iter()
+            .find(|r| r.identifier == "240.10b5-1" && r.date == "2023-02-27")
+            .expect("row survives");
+        assert!(kept.substantive, "the substantive row is the one kept");
+    }
+
+    fn amendment(identifier: &str, date: &str, substantive: bool) -> CfrAmendment {
+        CfrAmendment {
+            date: date.to_string(),
+            issue_date: None,
+            identifier: identifier.to_string(),
+            name: None,
+            part: None,
+            subpart: None,
+            substantive,
+            removed: false,
+            node_type: None,
+        }
     }
 
     #[test]

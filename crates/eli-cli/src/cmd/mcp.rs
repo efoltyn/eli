@@ -1596,17 +1596,20 @@ fn mcp_build_summary(tool: &str, output: &str) -> String {
             let extra = match mode {
                 "history" => {
                     let n = v.get("amendments").and_then(|x| x.as_array()).map(|a| a.len()).unwrap_or(0);
-                    let dates: Vec<String> = v
+                    // One date, many amended sections — the summary wants the
+                    // distinct dates, not one line per section.
+                    let mut dates: Vec<String> = v
                         .get("amendments")
                         .and_then(|x| x.as_array())
                         .map(|a| {
                             a.iter()
                                 .filter(|x| x.get("substantive").and_then(|s| s.as_bool()).unwrap_or(true))
                                 .filter_map(|x| x.get("date").and_then(|d| d.as_str()).map(str::to_string))
-                                .take(12)
                                 .collect()
                         })
                         .unwrap_or_default();
+                    dates.dedup();
+                    dates.truncate(12);
                     format!(
                         "\"amendments\":{n},\"recent_substantive_dates\":[{}]",
                         dates.iter().map(|d| format!("\"{d}\"")).collect::<Vec<_>>().join(",")
@@ -3498,5 +3501,82 @@ mod mcp_tool_tests {
         });
         let raw = serde_json::to_string(&input).unwrap();
         assert!(mcp_strip_metadata(&raw).is_none());
+    }
+
+    /// Every advertised tool must map to CLI args. Catches the failure where a
+    /// catalog entry is added (or an arg renamed) without the dispatch arm to
+    /// back it — which a client only discovers as "Unknown tool" mid-task.
+    #[test]
+    fn every_advertised_legal_tool_dispatches() {
+        let catalog: Vec<serde_json::Value> =
+            serde_json::from_str(include_str!("legal_tools.json")).expect("legal catalog parses");
+        assert_eq!(catalog.len(), 9, "catalog size changed — update the samples below");
+
+        // One minimally-valid argument set per tool, chosen to satisfy each
+        // tool's required-argument check.
+        let samples = [
+            ("legal_cite", serde_json::json!({"cite": "597 U.S. 1"})),
+            ("legal_cfr", serde_json::json!({"title": 17, "section": "240.10b5-1"})),
+            ("legal_fedreg", serde_json::json!({"q": "tariff"})),
+            ("legal_search", serde_json::json!({"q": "qualified immunity"})),
+            ("legal_docket", serde_json::json!({"court": "nysd", "number": "1:22-cr-00673"})),
+            ("legal_opinion", serde_json::json!({"cite": "597 U.S. 1"})),
+            ("legal_comments", serde_json::json!({"docket": "SEC-2026-5190"})),
+            ("legal_enforcement", serde_json::json!({"source": "doj"})),
+            ("legal_statute", serde_json::json!({"title": 15, "section": "78j"})),
+        ];
+
+        for tool in &catalog {
+            let name = tool.get("name").and_then(|n| n.as_str()).expect("tool has a name");
+            assert!(
+                tool.get("description").and_then(|d| d.as_str()).is_some_and(|d| d.len() > 200),
+                "{name} needs a description that tells the model when to reach for it"
+            );
+            let (_, args) = samples
+                .iter()
+                .find(|(n, _)| *n == name)
+                .unwrap_or_else(|| panic!("no sample args for advertised tool {name}"));
+            let built = mcp_build_cli_args(name, args)
+                .unwrap_or_else(|e| panic!("{name} failed to build CLI args: {e}"));
+            assert_eq!(built[0], "legal", "{name} must dispatch to the legal subcommand");
+        }
+    }
+
+    /// The required-argument checks must actually fire — a tool that silently
+    /// accepts an empty call wastes a round trip and returns a confusing error
+    /// from the CLI layer instead of a usable one from the MCP layer.
+    #[test]
+    fn legal_tools_reject_empty_arguments() {
+        let empty = serde_json::json!({});
+        for tool in [
+            "legal_cite",
+            "legal_cfr",
+            "legal_search",
+            "legal_docket",
+            "legal_opinion",
+            "legal_comments",
+            "legal_statute",
+        ] {
+            assert!(
+                mcp_build_cli_args(tool, &empty).is_err(),
+                "{tool} should reject an empty argument set"
+            );
+        }
+    }
+
+    /// The profile switch is what makes one binary two products; if it stops
+    /// filtering, a legal-search user gets 21 markets tools they did not ask for.
+    #[test]
+    fn profile_filters_the_catalog() {
+        let all = mcp_catalog().len();
+        std::env::set_var("ELI_MCP_PROFILE", "legal");
+        let legal = mcp_catalog();
+        std::env::set_var("ELI_MCP_PROFILE", "finance");
+        let finance = mcp_catalog();
+        std::env::remove_var("ELI_MCP_PROFILE");
+
+        assert!(legal.iter().all(|t| t["name"].as_str().is_some_and(|n| n.starts_with("legal_"))));
+        assert!(finance.iter().all(|t| t["name"].as_str().is_some_and(|n| n.starts_with("finance_"))));
+        assert_eq!(all, legal.len() + finance.len());
     }
 }

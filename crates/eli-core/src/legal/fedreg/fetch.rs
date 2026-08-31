@@ -39,6 +39,7 @@ const FR_FIELDS: &[&str] = &[
     "action",
     "dates",
     "page_length",
+    "regulations_dot_gov_info",
 ];
 
 #[derive(Clone, Debug)]
@@ -79,6 +80,10 @@ pub struct FedregDocument {
     pub page_length: Option<u64>,
     /// Only set on the public-inspection queue: when it was filed.
     pub filed_at: Option<String>,
+    /// The regulations.gov document id for this rule — the bridge from a
+    /// Federal Register document to its comment record, which is otherwise a
+    /// guess. Feed it (or the docket id) to legal_comments.
+    pub regulations_gov_document_id: Option<String>,
     pub abstract_text: Option<String>,
     pub html_url: Option<String>,
     pub raw_text_url: Option<String>,
@@ -479,6 +484,11 @@ fn parse_document(item: &serde_json::Value) -> FedregDocument {
         action: str_field("action"),
         page_length: item.get("page_length").and_then(|v| v.as_u64()),
         filed_at: str_field("filed_at"),
+        regulations_gov_document_id: item
+            .get("regulations_dot_gov_info")
+            .and_then(|r| r.get("document_id"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
         abstract_text: str_field("abstract"),
         html_url: str_field("html_url"),
         raw_text_url: str_field("raw_text_url"),
@@ -577,6 +587,19 @@ mod tests {
         assert!(joined.contains("conditions%5Bterm%5D=insider%20trading"));
         assert!(joined.contains("conditions%5Bcfr%5D%5Btitle%5D=17"));
         assert!(joined.contains("conditions%5Bpublication_date%5D%5Bgte%5D=2024-01-01"));
+    }
+
+    #[test]
+    fn extracts_the_regulations_gov_bridge_id() {
+        let raw = serde_json::json!({
+            "document_number": "2026-17183",
+            "regulations_dot_gov_info": {"document_id": "SEC-2026-5190-0001", "comment_url": null}
+        });
+        let doc = parse_document(&raw);
+        assert_eq!(
+            doc.regulations_gov_document_id.as_deref(),
+            Some("SEC-2026-5190-0001")
+        );
     }
 
     #[test]
