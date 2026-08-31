@@ -594,22 +594,51 @@ fn first_head(xml: &str) -> Option<String> {
     (!head.is_empty()).then_some(head)
 }
 
+/// Split regulatory prose into diffable units.
+///
+/// Naive splitting on any '.' shreds the citations that regulatory text is made
+/// of — "§ 240.10b5-1" becomes two units, "15 U.S.C. 78j" becomes four — and a
+/// diff of shredded units is unreadable. Break only where a sentence plausibly
+/// ends: the period is followed by whitespace, and what precedes it is neither
+/// a digit (a section or subsection number) nor a lone initial (U.S.C., No.).
 fn sentences(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
     let mut out = Vec::new();
-    let mut cur = String::new();
-    for ch in text.chars() {
-        cur.push(ch);
-        if ch == '.' || ch == ';' {
-            let t = cur.trim();
-            if t.len() > 1 {
-                out.push(t.to_string());
-                cur.clear();
-            }
+    let mut start = 0usize;
+
+    for i in 0..chars.len() {
+        if chars[i] != '.' && chars[i] != ';' {
+            continue;
+        }
+        let next_is_break = chars.get(i + 1).is_none_or(|c| c.is_whitespace());
+        if !next_is_break {
+            continue;
+        }
+        let prev = chars[..i].iter().rev().next().copied();
+        let is_number = prev.is_some_and(|c| c.is_ascii_digit());
+        // A lone capital before the dot is an initial in an abbreviation
+        // ("U.S.C.", "F. Supp."), not the end of a sentence.
+        let is_initial = prev.is_some_and(|c| c.is_ascii_uppercase())
+            && chars[..i]
+                .iter()
+                .rev()
+                .nth(1)
+                .is_none_or(|c| !c.is_ascii_alphabetic());
+        if chars[i] == '.' && (is_number || is_initial) {
+            continue;
+        }
+        let unit: String = chars[start..=i].iter().collect();
+        let trimmed = unit.trim();
+        if trimmed.len() > 1 {
+            out.push(trimmed.to_string());
+            start = i + 1;
         }
     }
-    let t = cur.trim();
-    if !t.is_empty() {
-        out.push(t.to_string());
+
+    let tail: String = chars[start..].iter().collect();
+    let tail = tail.trim();
+    if !tail.is_empty() {
+        out.push(tail.to_string());
     }
     out
 }
@@ -708,6 +737,25 @@ mod tests {
             removed: false,
             node_type: None,
         }
+    }
+
+    #[test]
+    fn sentence_split_keeps_citations_intact() {
+        let text = "Preliminary Note to § 240.10b5-1: This defines trading. \
+                    The Act (15 U.S.C. 78j) applies; see also Rule 10b-5.";
+        let units = sentences(text);
+        assert!(
+            units.iter().any(|u| u.contains("§ 240.10b5-1")),
+            "a section number must not be split across units: {units:?}"
+        );
+        assert!(
+            units.iter().any(|u| u.contains("15 U.S.C. 78j")),
+            "a statutory citation must not be split across units: {units:?}"
+        );
+        assert!(
+            units.iter().any(|u| u.trim_start().starts_with("The Act")),
+            "a real sentence boundary must still split: {units:?}"
+        );
     }
 
     #[test]
