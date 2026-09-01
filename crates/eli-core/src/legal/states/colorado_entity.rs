@@ -34,7 +34,8 @@ use crate::{Error, Result};
 /// throttled per-IP but generously enough for interactive lookups.
 const SOCRATA: &str = "https://data.colorado.gov/resource/4ykn-tg5h.json";
 /// The human dataset page — what `source_url` points at.
-const DATASET_PAGE: &str = "https://data.colorado.gov/Business/Business-Entities-in-Colorado/4ykn-tg5h";
+const DATASET_PAGE: &str =
+    "https://data.colorado.gov/Business/Business-Entities-in-Colorado/4ykn-tg5h";
 /// The authoritative record. `www.coloradosos.gov` serves it; the older
 /// `www.sos.state.co.us` host 403s automated requests, so never build that one.
 const SOS_DETAIL: &str = "https://www.coloradosos.gov/biz/BusinessEntityDetail.do";
@@ -201,10 +202,7 @@ fn plan_query(req: &EntityRequest) -> Result<Plan> {
             // upper() on both sides is the documented case-insensitive form;
             // SoQL `like` is case-sensitive on its own, and the register mixes
             // "State Farm" and "STATE FARM" freely.
-            format!(
-                "upper(entityname) like upper('%{}%')",
-                soql_escape(name)
-            ),
+            format!("upper(entityname) like upper('%{}%')", soql_escape(name)),
             Some(name.to_ascii_lowercase()),
             RANK_WINDOW.max(limit),
         ),
@@ -219,7 +217,12 @@ fn plan_query(req: &EntityRequest) -> Result<Plan> {
     };
 
     let mut where_clause = clause;
-    if let Some(status) = req.status.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(status) = req
+        .status
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         // Matched as a substring so "dissolved" reaches all three flavors of
         // dissolution rather than silently matching none of them.
         where_clause.push_str(&format!(
@@ -402,10 +405,15 @@ fn agent_name(row: &serde_json::Value) -> Option<String> {
     if let Some(org) = field(row, "agentorganizationname") {
         return Some(org);
     }
-    let parts: Vec<String> = ["agentfirstname", "agentmiddlename", "agentlastname", "agentsuffix"]
-        .iter()
-        .filter_map(|k| field(row, k))
-        .collect();
+    let parts: Vec<String> = [
+        "agentfirstname",
+        "agentmiddlename",
+        "agentlastname",
+        "agentsuffix",
+    ]
+    .iter()
+    .filter_map(|k| field(row, k))
+    .collect();
     (!parts.is_empty()).then(|| parts.join(" "))
 }
 
@@ -445,7 +453,11 @@ fn rank_by_name(records: &mut [EntityRecord], needle_lower: &str) {
 }
 
 fn rank_key(rec: &EntityRecord, needle_lower: &str) -> (u8, u8, std::cmp::Reverse<String>) {
-    let name = rec.entity_name.as_deref().unwrap_or_default().to_ascii_lowercase();
+    let name = rec
+        .entity_name
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
     let core = core_name(&name);
     let name_tier = if core == needle_lower || name == needle_lower {
         0
@@ -469,7 +481,12 @@ fn rank_key(rec: &EntityRecord, needle_lower: &str) -> (u8, u8, std::cmp::Revers
 /// never score as an exact match, so the suffix is stripped for comparison
 /// only — it is left intact in the record, because it is what the SOS shows.
 fn core_name(name_lower: &str) -> &str {
-    for marker in [", delinquent ", ", dissolved ", ", revoked ", ", withdrawn "] {
+    for marker in [
+        ", delinquent ",
+        ", dissolved ",
+        ", revoked ",
+        ", withdrawn ",
+    ] {
         if let Some(i) = name_lower.find(marker) {
             return name_lower[..i].trim_end();
         }
@@ -631,7 +648,10 @@ mod tests {
     #[test]
     fn escapes_single_quotes_in_a_company_name() {
         assert_eq!(soql_escape("O'Brien"), "O''Brien");
-        assert_eq!(soql_escape("708 O'Brien Owners' Association"), "708 O''Brien Owners'' Association");
+        assert_eq!(
+            soql_escape("708 O'Brien Owners' Association"),
+            "708 O''Brien Owners'' Association"
+        );
         let plan = plan_query(&EntityRequest {
             name: Some("O'Brien".to_string()),
             ..req()
@@ -666,7 +686,11 @@ mod tests {
         })
         .expect("plan");
         assert_eq!(param(&plan, "$where"), "entityid = '19871032828'");
-        assert!(plan.warnings.iter().any(|w| w.contains("name was ignored")), "{:?}", plan.warnings);
+        assert!(
+            plan.warnings.iter().any(|w| w.contains("name was ignored")),
+            "{:?}",
+            plan.warnings
+        );
     }
 
     #[test]
@@ -695,7 +719,11 @@ mod tests {
         })
         .expect("plan");
         assert_eq!(param(&plan, "$limit"), RANK_WINDOW.to_string());
-        assert!(plan.warnings.iter().any(|w| w.contains("lowered to")), "{:?}", plan.warnings);
+        assert!(
+            plan.warnings.iter().any(|w| w.contains("lowered to")),
+            "{:?}",
+            plan.warnings
+        );
 
         // An id lookup does not need the ranking window.
         let by_id = plan_query(&EntityRequest {
@@ -726,7 +754,10 @@ mod tests {
             Some("1 State Farm Plz, Bloomington, IL 61710")
         );
         // The whole point of the module: agent name and a servable CO street address.
-        assert_eq!(sf.agent_name.as_deref(), Some("CORPORATION SERVICE COMPANY"));
+        assert_eq!(
+            sf.agent_name.as_deref(),
+            Some("CORPORATION SERVICE COMPANY")
+        );
         assert_eq!(
             sf.agent_address.as_deref(),
             Some("1900 W Littleton Blvd, Littleton, CO 80120")
@@ -736,7 +767,10 @@ mod tests {
     #[test]
     fn builds_a_natural_person_agent_name_from_the_split_columns() {
         let recs = fixture_records();
-        assert_eq!(recs[1].agent_name.as_deref(), Some("KAITLIN CHRISTINE BAGLEY"));
+        assert_eq!(
+            recs[1].agent_name.as_deref(),
+            Some("KAITLIN CHRISTINE BAGLEY")
+        );
     }
 
     #[test]
@@ -767,7 +801,10 @@ mod tests {
 
         let mut warnings = Vec::new();
         flag_service_hazards(std::slice::from_ref(&rec), &mut warnings);
-        assert!(warnings.iter().any(|w| w.contains("10-3-1117")), "{warnings:?}");
+        assert!(
+            warnings.iter().any(|w| w.contains("10-3-1117")),
+            "{warnings:?}"
+        );
     }
 
     #[test]
@@ -790,7 +827,10 @@ mod tests {
     /// search would otherwise never score as exact.
     #[test]
     fn exact_match_survives_the_delinquency_suffix_in_the_name() {
-        assert_eq!(core_name("6301 state farm llc, delinquent may 1, 2022"), "6301 state farm llc");
+        assert_eq!(
+            core_name("6301 state farm llc, delinquent may 1, 2022"),
+            "6301 state farm llc"
+        );
         let recs = fixture_records();
         let key = rank_key(&recs[2], "6301 state farm llc");
         assert_eq!(key.0, 0, "should be an exact name match");
@@ -801,7 +841,12 @@ mod tests {
     fn active_means_good_standing_or_exists_and_nothing_else() {
         assert!(is_active(Some("Good Standing")));
         assert!(is_active(Some("exists")));
-        for dead in ["Delinquent", "Voluntarily Dissolved", "Withdrawn", "Registered Agent Resigned"] {
+        for dead in [
+            "Delinquent",
+            "Voluntarily Dissolved",
+            "Withdrawn",
+            "Registered Agent Resigned",
+        ] {
             assert!(!is_active(Some(dead)), "{dead}");
         }
         assert!(!is_active(None));
@@ -810,9 +855,16 @@ mod tests {
     #[test]
     fn builds_an_openable_sos_detail_url() {
         let url = detail_url("19871032828");
-        assert!(url.starts_with("https://www.coloradosos.gov/biz/BusinessEntityDetail.do?"), "{url}");
+        assert!(
+            url.starts_with("https://www.coloradosos.gov/biz/BusinessEntityDetail.do?"),
+            "{url}"
+        );
         // All three id parameters are required by the SOS page.
-        for p in ["masterFileId=19871032828", "entityId2=19871032828", "fileId=19871032828"] {
+        for p in [
+            "masterFileId=19871032828",
+            "entityId2=19871032828",
+            "fileId=19871032828",
+        ] {
             assert!(url.contains(p), "missing {p} in {url}");
         }
         // Never the sos.state.co.us host — it 403s.
@@ -826,12 +878,18 @@ mod tests {
             r#"{"principaladdress1":"1 Main","principalcity":"Denver","principalstate":"CO","principalzipcode":"80202","principalcountry":"US"}"#,
         )
         .expect("row");
-        assert_eq!(join_address(&dom, "principal").as_deref(), Some("1 Main, Denver, CO 80202"));
+        assert_eq!(
+            join_address(&dom, "principal").as_deref(),
+            Some("1 Main, Denver, CO 80202")
+        );
         let intl: serde_json::Value = serde_json::from_str(
             r#"{"principaladdress1":"1 King St","principalcity":"Toronto","principalstate":"ON","principalzipcode":"M5H","principalcountry":"CA"}"#,
         )
         .expect("row");
-        assert_eq!(join_address(&intl, "principal").as_deref(), Some("1 King St, Toronto, ON M5H, CA"));
+        assert_eq!(
+            join_address(&intl, "principal").as_deref(),
+            Some("1 King St, Toronto, ON M5H, CA")
+        );
         assert!(join_address(&serde_json::json!({}), "principal").is_none());
     }
 
@@ -842,7 +900,10 @@ mod tests {
         let body = r#"{"code":"query.compiler.malformed","error":true,"message":"Could not parse SoQL query at line 1 character 49"}"#;
         assert!(socrata_error_message(body).contains("Could not parse SoQL query"));
         // A non-JSON body still yields something.
-        assert_eq!(socrata_error_message("  gateway timeout "), "gateway timeout");
+        assert_eq!(
+            socrata_error_message("  gateway timeout "),
+            "gateway timeout"
+        );
     }
 
     #[test]
@@ -883,10 +944,19 @@ mod tests {
         );
         assert_eq!(first.status.as_deref(), Some("Good Standing"));
         let agent = first.agent_name.as_deref().expect("registered agent name");
-        let addr = first.agent_address.as_deref().expect("registered agent address");
+        let addr = first
+            .agent_address
+            .as_deref()
+            .expect("registered agent address");
         assert!(!agent.is_empty(), "agent name is the whole point");
-        assert!(addr.contains("CO"), "agent must have a Colorado address: {addr}");
-        assert!(out.warnings.iter().any(|w| w.contains("daily Socrata mirror")));
+        assert!(
+            addr.contains("CO"),
+            "agent must have a Colorado address: {addr}"
+        );
+        assert!(out
+            .warnings
+            .iter()
+            .any(|w| w.contains("daily Socrata mirror")));
     }
 
     #[tokio::test]
@@ -899,7 +969,10 @@ mod tests {
         .await
         .expect("lookup");
         assert_eq!(out.returned, 1);
-        assert_eq!(out.entities[0].formation_date.as_deref(), Some("1927-05-19"));
+        assert_eq!(
+            out.entities[0].formation_date.as_deref(),
+            Some("1927-05-19")
+        );
     }
 
     /// Socrata sometimes hands back a number where it usually hands back a
