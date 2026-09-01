@@ -23,6 +23,9 @@ use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 
 pub mod colorado;
+pub mod colorado_damages;
+pub mod colorado_deadlines;
+pub mod colorado_entity;
 pub mod massachusetts;
 pub mod opinions;
 pub mod wisconsin;
@@ -331,5 +334,152 @@ mod tests {
                 );
             }
         }
+    }
+}
+
+// ── damages caps ───────────────────────────────────────────────────────────
+
+#[derive(Clone, Debug)]
+pub struct DamagesCapRequest {
+    pub state: String,
+    /// noneconomic | wrongful_death | solatium | dram_shop | medmal
+    pub claim_type: String,
+    /// When the claim accrued — usually, but not always, the injury date.
+    pub accrual_date: String,
+    /// When suit was (or will be) filed. Colorado's 2025 amendment keys off
+    /// BOTH dates, so omitting this can change the answer by a factor of two.
+    pub filing_date: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct DamagesCap {
+    pub claim_type: String,
+    pub citation: String,
+    pub amount: Option<i64>,
+    /// Some caps may be raised by the court on clear and convincing evidence.
+    pub increased_maximum: Option<i64>,
+    /// Which accrual band or statutory provision produced this figure.
+    pub basis: String,
+    pub source: String,
+    pub source_url: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DamagesCapResponse {
+    pub generated_at: chrono::DateTime<chrono::Utc>,
+    pub state: String,
+    pub accrual_date: String,
+    pub filing_date: Option<String>,
+    pub caps: Vec<DamagesCap>,
+    /// The certificate revision this answer was built from, so a caller can
+    /// tell whether it predates a newer certification.
+    pub certificate_revised: Option<String>,
+    pub warnings: Vec<String>,
+}
+
+pub async fn fetch_damages_cap(req: DamagesCapRequest) -> Result<DamagesCapResponse> {
+    let code = normalize_state(&req.state);
+    match code.as_str() {
+        "co" => colorado_damages::fetch(req).await,
+        _ => Err(unsupported(&code, "damages cap", |s| s.code == "co")),
+    }
+}
+
+// ── deadlines ──────────────────────────────────────────────────────────────
+
+#[derive(Clone, Debug)]
+pub struct DeadlinesRequest {
+    pub state: String,
+    /// Date of injury. Accrual can differ under the discovery rule — the
+    /// response says so rather than pretending the two are always the same.
+    pub injury_date: String,
+    /// motor_vehicle | general | medical | premises | other
+    pub mechanism: String,
+    /// Whether any public entity or public employee is implicated. In Denver
+    /// that means RTD, the City, and Denver Health among others.
+    pub public_entity: bool,
+    /// Whether a licensed professional is a defendant (drives the certificate
+    /// of review).
+    pub professional_defendant: bool,
+    /// Optional known dates that unlock the post-filing deadlines.
+    pub filing_date: Option<String>,
+    pub service_date: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct Deadline {
+    pub name: String,
+    pub citation: String,
+    /// Computed date, when the inputs allow it.
+    pub date: Option<String>,
+    /// What the date is measured from, named explicitly.
+    pub runs_from: String,
+    pub period: String,
+    /// True when blowing this ends the claim outright.
+    pub fatal: bool,
+    pub note: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DeadlinesResponse {
+    pub generated_at: chrono::DateTime<chrono::Utc>,
+    pub state: String,
+    pub injury_date: String,
+    pub deadlines: Vec<Deadline>,
+    /// Determinations a person has to make; the tool computes dates, it does
+    /// not decide whether a defendant is a public entity.
+    pub judgment_calls: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+pub async fn fetch_deadlines(req: DeadlinesRequest) -> Result<DeadlinesResponse> {
+    let code = normalize_state(&req.state);
+    match code.as_str() {
+        "co" => colorado_deadlines::fetch(req).await,
+        _ => Err(unsupported(&code, "deadline", |s| s.code == "co")),
+    }
+}
+
+// ── business entities ──────────────────────────────────────────────────────
+
+#[derive(Clone, Debug)]
+pub struct EntityRequest {
+    pub state: String,
+    pub name: Option<String>,
+    pub entity_id: Option<String>,
+    pub status: Option<String>,
+    pub limit: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct EntityRecord {
+    pub entity_id: Option<String>,
+    pub entity_name: Option<String>,
+    pub status: Option<String>,
+    pub entity_type: Option<String>,
+    pub formation_date: Option<String>,
+    pub jurisdiction: Option<String>,
+    pub principal_address: Option<String>,
+    pub agent_name: Option<String>,
+    pub agent_address: Option<String>,
+    pub url: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EntityResponse {
+    pub generated_at: chrono::DateTime<chrono::Utc>,
+    pub state: String,
+    pub returned: usize,
+    pub entities: Vec<EntityRecord>,
+    pub source: Option<String>,
+    pub source_url: Option<String>,
+    pub warnings: Vec<String>,
+}
+
+pub async fn fetch_entity(req: EntityRequest) -> Result<EntityResponse> {
+    let code = normalize_state(&req.state);
+    match code.as_str() {
+        "co" => colorado_entity::fetch_entity(req).await,
+        _ => Err(unsupported(&code, "entity lookup", |s| s.code == "co")),
     }
 }

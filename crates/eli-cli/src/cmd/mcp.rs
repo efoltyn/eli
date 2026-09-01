@@ -2869,6 +2869,69 @@ fn mcp_build_cli_args(tool: &str, args: &serde_json::Value) -> anyhow::Result<Ve
             }
             Ok(v)
         }
+        "legal_deadlines" => {
+            let mut v = vec![s("legal"), s("deadlines")];
+            let injury = args
+                .get("injury_date")
+                .and_then(|x| x.as_str())
+                .ok_or_else(|| anyhow::anyhow!("injury_date required"))?;
+            v.extend([s("--injury-date"), s(injury)]);
+            for (json_key, flag) in [
+                ("state", "--state"),
+                ("mechanism", "--mechanism"),
+                ("filing_date", "--filing-date"),
+                ("service_date", "--service-date"),
+            ] {
+                if let Some(val) = args.get(json_key).and_then(|x| x.as_str()) {
+                    v.extend([s(flag), s(val)]);
+                }
+            }
+            if args.get("public_entity").and_then(|x| x.as_bool()) == Some(true) {
+                v.push(s("--public-entity"));
+            }
+            if args.get("professional_defendant").and_then(|x| x.as_bool()) == Some(true) {
+                v.push(s("--professional-defendant"));
+            }
+            Ok(v)
+        }
+        "legal_caps" => {
+            let mut v = vec![s("legal"), s("caps")];
+            let accrual = args
+                .get("accrual_date")
+                .and_then(|x| x.as_str())
+                .ok_or_else(|| anyhow::anyhow!("accrual_date required"))?;
+            v.extend([s("--accrual-date"), s(accrual)]);
+            for (json_key, flag) in [
+                ("state", "--state"),
+                ("claim_type", "--claim-type"),
+                ("filing_date", "--filing-date"),
+            ] {
+                if let Some(val) = args.get(json_key).and_then(|x| x.as_str()) {
+                    v.extend([s(flag), s(val)]);
+                }
+            }
+            Ok(v)
+        }
+        "legal_entity" => {
+            let mut v = vec![s("legal"), s("entity")];
+            for (json_key, flag) in [
+                ("state", "--state"),
+                ("name", "--name"),
+                ("id", "--id"),
+                ("status", "--status"),
+            ] {
+                if let Some(val) = args.get(json_key).and_then(|x| x.as_str()) {
+                    v.extend([s(flag), s(val)]);
+                }
+            }
+            if !v.iter().any(|a| a == "--name" || a == "--id") {
+                anyhow::bail!("legal_entity needs name or id");
+            }
+            if let Some(n) = args.get("limit").and_then(|x| x.as_u64()) {
+                v.extend([s("--limit"), n.to_string()]);
+            }
+            Ok(v)
+        }
         _ => Err(anyhow::anyhow!("Unknown tool: {tool}")),
     }
 }
@@ -3562,7 +3625,7 @@ mod mcp_tool_tests {
     fn every_advertised_legal_tool_dispatches() {
         let catalog: Vec<serde_json::Value> =
             serde_json::from_str(include_str!("legal_tools.json")).expect("legal catalog parses");
-        assert_eq!(catalog.len(), 11, "catalog size changed — update the samples below");
+        assert_eq!(catalog.len(), 14, "catalog size changed — update the samples below");
 
         // One minimally-valid argument set per tool, chosen to satisfy each
         // tool's required-argument check.
@@ -3578,6 +3641,9 @@ mod mcp_tool_tests {
             ("legal_statute", serde_json::json!({"title": 15, "section": "78j"})),
             ("legal_state_record", serde_json::json!({"state": "wi", "county": "Milwaukee"})),
             ("legal_state_opinions", serde_json::json!({"state": "il"})),
+            ("legal_deadlines", serde_json::json!({"injury_date": "2024-03-15", "mechanism": "motor_vehicle"})),
+            ("legal_caps", serde_json::json!({"accrual_date": "2024-06-01", "filing_date": "2025-07-01"})),
+            ("legal_entity", serde_json::json!({"state": "co", "name": "STATE FARM"})),
         ];
 
         for tool in &catalog {
@@ -3603,6 +3669,7 @@ mod mcp_tool_tests {
     fn legal_tools_reject_empty_arguments() {
         let empty = serde_json::json!({});
         for tool in [
+            "legal_entity",
             "legal_cite",
             "legal_cfr",
             "legal_search",

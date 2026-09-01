@@ -417,5 +417,102 @@
         }
       }
     }
+  },
+  {
+    "name": "legal_deadlines",
+    "description": "Case deadlines computed from statute, with the citation for each \u2014 the rules that decide whether a claim EXISTS, as opposed to what it is worth. Colorado is the covered state and it is a good example of why this is worth a tool: a general tort has a two-year limitations period, but a tort arising from the use or operation of a motor vehicle has THREE. Same injury, different clock. And the Governmental Immunity Act notice is 182 days, is JURISDICTIONAL, cannot be cured, and reaches defendants people do not think of as governmental \u2014 in Denver that includes RTD and Denver Health. Give it an injury date and a mechanism and it returns every operative deadline with what it runs from, the period, the authority, and whether blowing it is fatal. IMPORTANT \u2014 it computes DATES from fixed statutory periods; it does not decide the legal questions those periods hang on. Whether a defendant is a public entity, whether the discovery rule moved accrual off the injury date, whether a vehicle was in 'use or operation' \u2014 those come back in `judgment_calls` rather than being silently assumed. It also declines to compute the C.R.C.P. 16.1 exclusion deadline, because current Colorado court rules are not available in a free machine-readable form and it will not quote a period it cannot verify as current.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "type": "string",
+          "description": "State code. Currently only `co`."
+        },
+        "injury_date": {
+          "type": "string",
+          "description": "YYYY-MM-DD. Accrual is presumed equal to this; the response says so."
+        },
+        "mechanism": {
+          "type": "string",
+          "description": "motor_vehicle | general | medical | premises | product | other. This choice changes the limitations period by a year in Colorado."
+        },
+        "public_entity": {
+          "type": "boolean",
+          "description": "Any public entity or public employee implicated. If unsure, say true \u2014 the 182-day notice is jurisdictional and uncurable."
+        },
+        "professional_defendant": {
+          "type": "boolean",
+          "description": "A licensed professional is a defendant, which triggers the 60-day certificate of review."
+        },
+        "filing_date": {
+          "type": "string",
+          "description": "YYYY-MM-DD, unlocks post-commencement deadlines."
+        },
+        "service_date": {
+          "type": "string",
+          "description": "YYYY-MM-DD. The certificate of review runs from SERVICE, not filing."
+        }
+      },
+      "required": [
+        "injury_date"
+      ]
+    }
+  },
+  {
+    "name": "legal_caps",
+    "description": "Damages caps resolved by BOTH accrual date and filing date. This is the single question the open web answers wrong most reliably, and the reason is structural: the operative dollar figures are not in the statute. C.R.S. 13-21-102.5 carries a base number and date-keyed branches, while the adjusted amounts live in a Colorado Secretary of State certificate reissued on a schedule \u2014 so a page quoting the statute is stale and a page quoting an old certificate is wrong, and neither looks wrong. Then the 2024 amendment made it two-dimensional: claims accruing on or after 2025-01-01 take a flat statutory figure, AND any civil action filed during calendar 2025 takes it too, even on an earlier accrual. The same 2024 injury is capped at roughly twice as much if suit was filed in 2025 rather than 2026. Always pass `filing_date` \u2014 omitting it on a 2024 accrual is flagged, because the answer genuinely depends on it. Returns the amount, the court-raised maximum where one exists, the accrual band or statutory provision that produced it, and the certificate revision date so you can tell whether the answer predates a newer certification. Medical malpractice is refused rather than answered, because it is carved out of this statute and capped separately on a different schedule.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "type": "string",
+          "description": "State code. Currently only `co`."
+        },
+        "claim_type": {
+          "type": "string",
+          "description": "noneconomic | wrongful_death | solatium | dram_shop | medmal | all (default all)."
+        },
+        "accrual_date": {
+          "type": "string",
+          "description": "YYYY-MM-DD. When the claim accrued \u2014 usually but not always the injury date."
+        },
+        "filing_date": {
+          "type": "string",
+          "description": "YYYY-MM-DD. Pass it. Colorado keys the cap off the filing date as well as accrual, and the difference can be a factor of two."
+        }
+      },
+      "required": [
+        "accrual_date"
+      ]
+    }
+  },
+  {
+    "name": "legal_entity",
+    "description": "Business entity and REGISTERED AGENT lookup from the state's own corporate registry. The registered agent is not a nicety: a Colorado insurance-disclosure demand under C.R.S. 10-3-1117 must be served on the agent or the 30-day clock and the $100/day penalty never start, and service of process on an entity defendant needs the same record. Returns entity id, name, status, type, formation date, jurisdiction, principal address, and the agent's name and address, plus a link to the official record. Search by `name` for a substring match or `id` for an exact one. Check `status` before relying on a result \u2014 serving a dissolved entity is a real and recoverable-from-nothing mistake.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "type": "string",
+          "description": "State code. Currently only `co`."
+        },
+        "name": {
+          "type": "string",
+          "description": "Entity name, substring match, case-insensitive."
+        },
+        "id": {
+          "type": "string",
+          "description": "Exact entity id, when you have it."
+        },
+        "status": {
+          "type": "string",
+          "description": "Status filter, e.g. \"Good Standing\"."
+        },
+        "limit": {
+          "type": "integer",
+          "description": "Max results (default 10)."
+        }
+      }
+    }
   }
 ]

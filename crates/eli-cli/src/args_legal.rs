@@ -26,6 +26,84 @@ enum LegalCommand {
     Record(LegalRecordArgs),
     /// State appellate opinions from the state's own feed, including unpublished ones.
     Opinions(LegalOpinionsArgs),
+    /// Case deadlines computed from statute — limitations, government notice, certificate of review.
+    Deadlines(LegalDeadlinesArgs),
+    /// Damages caps resolved by accrual date and filing date.
+    Caps(LegalCapsArgs),
+    /// Business entity and registered-agent lookup.
+    Entity(LegalEntityArgs),
+}
+
+#[derive(clap::Args, Debug)]
+pub struct LegalDeadlinesArgs {
+    /// State code. Currently co.
+    #[arg(long, default_value = "co")]
+    pub state: String,
+    /// Date of injury (YYYY-MM-DD).
+    #[arg(long)]
+    pub injury_date: String,
+    /// motor_vehicle | general | medical | premises | product | other.
+    #[arg(long, default_value = "general")]
+    pub mechanism: String,
+    /// Any public entity or public employee implicated (RTD, the city, Denver Health...).
+    #[arg(long, default_value_t = false)]
+    pub public_entity: bool,
+    /// A licensed professional is a defendant (drives the certificate of review).
+    #[arg(long, default_value_t = false)]
+    pub professional_defendant: bool,
+    /// Date suit was filed (YYYY-MM-DD), for post-commencement deadlines.
+    #[arg(long)]
+    pub filing_date: Option<String>,
+    /// Date the complaint was served (YYYY-MM-DD).
+    #[arg(long)]
+    pub service_date: Option<String>,
+    #[arg(long, default_value = "json")]
+    pub format: String,
+    #[arg(long)]
+    pub out: Option<PathBuf>,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct LegalCapsArgs {
+    /// State code. Currently co.
+    #[arg(long, default_value = "co")]
+    pub state: String,
+    /// noneconomic | wrongful_death | solatium | dram_shop | medmal | all.
+    #[arg(long, default_value = "all")]
+    pub claim_type: String,
+    /// When the claim accrued (YYYY-MM-DD).
+    #[arg(long)]
+    pub accrual_date: String,
+    /// When suit was or will be filed (YYYY-MM-DD). Colorado keys off both dates.
+    #[arg(long)]
+    pub filing_date: Option<String>,
+    #[arg(long, default_value = "json")]
+    pub format: String,
+    #[arg(long)]
+    pub out: Option<PathBuf>,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct LegalEntityArgs {
+    /// State code. Currently co.
+    #[arg(long, default_value = "co")]
+    pub state: String,
+    /// Entity name (substring match).
+    #[arg(long)]
+    pub name: Option<String>,
+    /// Exact entity id.
+    #[arg(long)]
+    pub id: Option<String>,
+    /// Status filter, e.g. "Good Standing".
+    #[arg(long)]
+    pub status: Option<String>,
+    /// Max results (default 10).
+    #[arg(long, default_value = "10")]
+    pub limit: usize,
+    #[arg(long, default_value = "json")]
+    pub format: String,
+    #[arg(long)]
+    pub out: Option<PathBuf>,
 }
 
 #[derive(clap::Args, Debug)]

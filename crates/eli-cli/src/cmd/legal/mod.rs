@@ -271,3 +271,52 @@ async fn cmd_legal_opinions(args: LegalOpinionsArgs) -> Result<()> {
         .context("legal opinions")?;
     legal_emit(&resp, args.out, "legal.opinions", &args.format)
 }
+
+async fn cmd_legal_deadlines(args: LegalDeadlinesArgs) -> Result<()> {
+    let req = eli_core::legal::states::DeadlinesRequest {
+        state: args.state,
+        injury_date: args.injury_date,
+        mechanism: args.mechanism,
+        public_entity: args.public_entity,
+        professional_defendant: args.professional_defendant,
+        filing_date: args.filing_date,
+        service_date: args.service_date,
+    };
+    let resp = eli_core::legal::states::fetch_deadlines(req)
+        .await
+        .map_err(|e| anyhow::anyhow!(e))
+        .context("legal deadlines")?;
+    legal_emit(&resp, args.out, "legal.deadlines", &args.format)
+}
+
+async fn cmd_legal_caps(args: LegalCapsArgs) -> Result<()> {
+    let req = eli_core::legal::states::DamagesCapRequest {
+        state: args.state,
+        claim_type: args.claim_type,
+        accrual_date: args.accrual_date,
+        filing_date: args.filing_date,
+    };
+    let resp = eli_core::legal::states::fetch_damages_cap(req)
+        .await
+        .map_err(|e| anyhow::anyhow!(e))
+        .context("legal caps")?;
+    legal_emit(&resp, args.out, "legal.caps", &args.format)
+}
+
+async fn cmd_legal_entity(args: LegalEntityArgs) -> Result<()> {
+    if args.name.is_none() && args.id.is_none() {
+        anyhow::bail!("legal entity requires --name or --id");
+    }
+    let req = eli_core::legal::states::EntityRequest {
+        state: args.state,
+        name: args.name,
+        entity_id: args.id,
+        status: args.status,
+        limit: args.limit.clamp(1, 100),
+    };
+    let resp = eli_core::legal::states::fetch_entity(req)
+        .await
+        .map_err(|e| anyhow::anyhow!(e))
+        .context("legal entity")?;
+    legal_emit(&resp, args.out, "legal.entity", &args.format)
+}

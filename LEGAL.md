@@ -96,6 +96,63 @@ captcha-gated; this tool does not attempt it and says so in `warnings`.
   per court. They are a watcher, not an archive: an empty result means "not
   recent", never "no such case". Use `legal_search` for the historical corpus.
 
+## Colorado personal injury
+
+Three tools built for one practice area, because a toolkit that is excellent for
+a Denver PI lawyer is worth more than one that is adequate everywhere.
+
+**`legal_caps`** — damages caps by accrual date AND filing date. This is the
+question the open web answers wrong most reliably, for a structural reason: the
+operative figures are not in the statute. C.R.S. 13-21-102.5 carries a base
+number and date-keyed branches; the adjusted amounts live in a Secretary of
+State certificate reissued on a schedule. So a page quoting the statute is
+stale, a page quoting an old certificate is wrong, and neither looks wrong.
+
+Then the 2024 amendment made it two-dimensional. A claim accruing on or after
+2025-01-01 takes a flat statutory figure — and so does any civil action *filed*
+during calendar 2025, even on an earlier accrual:
+
+```
+accrual 2024-06-01, filed 2025-07-01  ->  $1,500,000   13-21-102.5(3)(c)(II)
+accrual 2024-06-01, filed 2026-02-01  ->    $729,790   13-21-102.5(3)(a)
+```
+
+Same injury. A $770,210 swing on the filing date alone.
+
+**`legal_deadlines`** — the rules that decide whether a claim exists at all.
+Colorado splits where most states do not: a general tort is two years, a tort
+from the use or operation of a motor vehicle is **three**. The Governmental
+Immunity Act notice is 182 days, jurisdictional, uncurable, and reaches
+defendants nobody thinks of as governmental — in Denver, RTD and Denver Health.
+
+**`legal_entity`** — registered-agent lookup. A C.R.S. 10-3-1117 insurance
+disclosure demand must be served on the registered agent or the 30-day clock and
+the $100/day penalty never start.
+
+### What these tools refuse to do
+
+- **`legal_deadlines` computes dates, it does not make legal determinations.**
+  Whether a defendant is a public entity, whether the discovery rule moved
+  accrual off the injury date, whether a vehicle was in "use or operation" —
+  those come back in `judgment_calls`, not silently assumed.
+- **It will not compute the C.R.C.P. 16.1 exclusion deadline.** Simplified
+  Procedure applies by default and caps a judgment at $100,000 unless excluded,
+  so it matters — but current Colorado court rules are not available in a free
+  machine-readable form (the only free General Assembly PDF is the 2023 edition,
+  three years stale). The tool names the trap and declines to quote a period it
+  cannot verify as current.
+- **`legal_caps` refuses medical malpractice**, which is carved out of
+  13-21-102.5 and capped separately on a schedule keyed to the acts-or-omissions
+  date. Answering it from the wrong table would be worse than not answering.
+- Where a figure cannot be resolved, `amount` is **null** with a warning — never
+  a plausible guess. A wrong dollar amount is the worst output these tools could
+  produce.
+
+Cap figures are a transcribed table, not a live PDF parse, carrying the
+certificate revision date (`certificate_revised`) so a caller can tell whether
+the answer predates a newer certification. Indexing resumes 2028-01-01, and past
+that date the tool warns that the table is stale by construction.
+
 ## API keys
 
 Everything works with no key at all. Two upgrades are worth taking:
