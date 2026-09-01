@@ -43,6 +43,12 @@ pub struct StateCoverage {
     pub trial_records: bool,
     /// Appellate opinions feed, including non-precedential ones.
     pub opinions: bool,
+    /// Business-entity and registered-agent register.
+    pub entities: bool,
+    /// Damages caps resolvable by date.
+    pub damages_caps: bool,
+    /// Case deadlines computable from statute.
+    pub deadlines: bool,
 }
 
 /// The verified coverage table. Adding a row here without a working
@@ -55,6 +61,9 @@ pub const COVERAGE: &[StateCoverage] = &[
         statutes: true,
         trial_records: true,
         opinions: false,
+            entities: false,
+        damages_caps: false,
+        deadlines: false,
     },
     StateCoverage {
         code: "co",
@@ -62,6 +71,9 @@ pub const COVERAGE: &[StateCoverage] = &[
         statutes: true,
         trial_records: false,
         opinions: false,
+            entities: true,
+        damages_caps: true,
+        deadlines: true,
     },
     StateCoverage {
         code: "ma",
@@ -69,6 +81,9 @@ pub const COVERAGE: &[StateCoverage] = &[
         statutes: true,
         trial_records: false,
         opinions: false,
+            entities: false,
+        damages_caps: false,
+        deadlines: false,
     },
     StateCoverage {
         code: "il",
@@ -76,6 +91,9 @@ pub const COVERAGE: &[StateCoverage] = &[
         statutes: false,
         trial_records: false,
         opinions: true,
+            entities: false,
+        damages_caps: false,
+        deadlines: false,
     },
     StateCoverage {
         code: "pa",
@@ -83,6 +101,9 @@ pub const COVERAGE: &[StateCoverage] = &[
         statutes: false,
         trial_records: false,
         opinions: true,
+            entities: false,
+        damages_caps: false,
+        deadlines: false,
     },
     StateCoverage {
         code: "mi",
@@ -90,6 +111,9 @@ pub const COVERAGE: &[StateCoverage] = &[
         statutes: false,
         trial_records: false,
         opinions: true,
+            entities: false,
+        damages_caps: false,
+        deadlines: false,
     },
     StateCoverage {
         code: "nj",
@@ -97,6 +121,9 @@ pub const COVERAGE: &[StateCoverage] = &[
         statutes: false,
         trial_records: false,
         opinions: true,
+            entities: false,
+        damages_caps: false,
+        deadlines: false,
     },
 ];
 
@@ -332,6 +359,18 @@ mod tests {
                     "opinions arm missing for {}",
                     s.code
                 );
+            }
+            // The three Colorado-only layers. The table is what a caller reads
+            // to know what is answerable, so a row claiming a layer with no
+            // dispatcher behind it would be the table telling a lie.
+            for (claimed, layer) in [
+                (s.entities, "entity"),
+                (s.damages_caps, "damages cap"),
+                (s.deadlines, "deadline"),
+            ] {
+                if claimed {
+                    assert_eq!(s.code, "co", "{layer} arm missing for {}", s.code);
+                }
             }
         }
     }
