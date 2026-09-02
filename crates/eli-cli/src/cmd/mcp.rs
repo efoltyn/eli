@@ -129,14 +129,39 @@ fn mcp_initialize(id: serde_json::Value, request: &serde_json::Value) -> serde_j
     })
 }
 
-fn mcp_tools_list(id: serde_json::Value) -> serde_json::Value {
-    let tools: serde_json::Value =
-        serde_json::from_str(include_str!("mcp_tools.json")).expect("valid MCP tools catalog");
+/// Which tool families this server advertises.
+///
+/// One binary, two products: `market-search` ships the finance catalog,
+/// `legal-search` ships the legal one, and `--profile all` (or setting
+/// `ELI_MCP_PROFILE=all`) exposes both to a client that wants everything.
+/// Filtering happens at `tools/list` only — `tools/call` still dispatches any
+/// known tool, so a client that cached an older catalog keeps working.
+fn mcp_profile() -> String {
+    std::env::var("ELI_MCP_PROFILE")
+        .ok()
+        .map(|v| v.trim().to_ascii_lowercase())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "all".to_string())
+}
 
+fn mcp_catalog() -> Vec<serde_json::Value> {
+    let finance: Vec<serde_json::Value> =
+        serde_json::from_str(include_str!("mcp_tools.json")).expect("valid MCP tools catalog");
+    let legal: Vec<serde_json::Value> =
+        serde_json::from_str(include_str!("legal_tools.json")).expect("valid legal tools catalog");
+
+    match mcp_profile().as_str() {
+        "finance" | "market" | "markets" => finance,
+        "legal" | "law" => legal,
+        _ => finance.into_iter().chain(legal).collect(),
+    }
+}
+
+fn mcp_tools_list(id: serde_json::Value) -> serde_json::Value {
     json!({
         "jsonrpc": "2.0",
         "id": id,
-        "result": { "tools": tools }
+        "result": { "tools": mcp_catalog() }
     })
 }
 
@@ -1442,6 +1467,175 @@ fn mcp_build_summary(tool: &str, output: &str) -> String {
                 lines.iter().map(|l| format!("\"{}\"", l.replace('"', "'"))).collect::<Vec<_>>().join(",")
             )
         }
+        // ── legal ──────────────────────────────────────────────────────────
+        "legal_cite" => {
+            // The verdict line matters more than the payload here: a caller
+            // that only reads the summary must still see which cites failed.
+            let checked = v.get("checked").and_then(|x| x.as_u64()).unwrap_or(0);
+            let verified = v.get("verified").and_then(|x| x.as_u64()).unwrap_or(0);
+            let unverified = v.get("unverified").and_then(|x| x.as_u64()).unwrap_or(0);
+            let mut lines = Vec::new();
+            if let Some(arr) = v.get("citations").and_then(|x| x.as_array()) {
+                for c in arr.iter().take(25) {
+                    let cite = c.get("citation").and_then(|x| x.as_str()).unwrap_or("?");
+                    let exists = c.get("exists").and_then(|x| x.as_bool()).unwrap_or(false);
+                    let name = c.get("case_name").and_then(|x| x.as_str()).unwrap_or("");
+                    lines.push(if exists {
+                        format!("OK {cite} = {name}")
+                    } else {
+                        format!("NOT FOUND {cite}")
+                    });
+                }
+            }
+            let cited_by_total = v
+                .get("cited_by_total")
+                .and_then(|x| x.as_u64())
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "null".to_string());
+            format!(
+                "\"checked\":{checked},\"verified\":{verified},\"unverified\":{unverified},\"cited_by_total\":{cited_by_total},\"_schema\":\".citations[].{{citation,exists,case_name,court,date_filed,url,note}}\",\"verdicts\":[{}]",
+                lines.iter().map(|l| format!("\"{}\"", l.replace('"', "'"))).collect::<Vec<_>>().join(",")
+            )
+        }
+        "legal_search" => {
+            let total = v
+                .get("total_available")
+                .and_then(|x| x.as_u64())
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "null".to_string());
+            let mut lines = Vec::new();
+            if let Some(arr) = v.get("results").and_then(|x| x.as_array()) {
+                for r in arr.iter().take(20) {
+                    let name: String = r
+                        .get("case_name")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("?")
+                        .chars()
+                        .take(48)
+                        .collect();
+                    let court = r.get("court_id").and_then(|x| x.as_str()).unwrap_or("?");
+                    let date = r.get("date_filed").and_then(|x| x.as_str()).unwrap_or("?");
+                    let cites = r.get("cite_count").and_then(|x| x.as_u64()).unwrap_or(0);
+                    lines.push(format!("{name}|{court}|{date}|cited:{cites}"));
+                }
+            }
+            format!(
+                "\"total_available\":{total},\"returned\":{},\"_schema\":\".results[].{{case_name,citation,court,court_id,date_filed,judge,cite_count,snippet,opinion_id,url}}\",\"hits\":[{}]",
+                v.get("results").and_then(|x| x.as_array()).map(|a| a.len()).unwrap_or(0),
+                lines.iter().map(|l| format!("\"{}\"", l.replace('"', "'"))).collect::<Vec<_>>().join(",")
+            )
+        }
+        "legal_docket" => {
+            let name = v.get("case_name").and_then(|x| x.as_str()).unwrap_or("?");
+            let court = v.get("court").and_then(|x| x.as_str()).unwrap_or("?");
+            let number = v.get("docket_number").and_then(|x| x.as_str()).unwrap_or("?");
+            let total = v.get("entry_count").and_then(|x| x.as_u64()).unwrap_or(0);
+            let returned = v.get("entries").and_then(|x| x.as_array()).map(|a| a.len()).unwrap_or(0);
+            let mut lines = Vec::new();
+            if let Some(arr) = v.get("entries").and_then(|x| x.as_array()) {
+                for e in arr.iter().take(20) {
+                    let n = e.get("entry_number").and_then(|x| x.as_u64()).unwrap_or(0);
+                    let date = e.get("date_filed").and_then(|x| x.as_str()).unwrap_or("?");
+                    let desc: String = e
+                        .get("description")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .chars()
+                        .take(60)
+                        .collect();
+                    lines.push(format!("#{n}|{date}|{desc}"));
+                }
+            }
+            // Which upstream answered decides how much to trust `entry_count`:
+            // the key-free RECAP path reports only what search indexed.
+            let source = v.get("source").and_then(|x| x.as_str()).unwrap_or("?");
+            format!(
+                "\"case_name\":\"{}\",\"court\":\"{court}\",\"docket_number\":\"{number}\",\"source\":\"{source}\",\"entry_count\":{total},\"entries_returned\":{returned},\"_schema\":\".entries[].{{entry_number,date_filed,description,documents[]}}\",\"docket\":[{}]",
+                name.replace('"', "'"),
+                lines.iter().map(|l| format!("\"{}\"", l.replace('"', "'"))).collect::<Vec<_>>().join(",")
+            )
+        }
+        "legal_fedreg" => {
+            let mode = v.get("mode").and_then(|x| x.as_str()).unwrap_or("search");
+            let total = v
+                .get("total_available")
+                .and_then(|x| x.as_u64())
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "null".to_string());
+            let mut lines = Vec::new();
+            if mode == "facet" {
+                if let Some(arr) = v.get("facets").and_then(|x| x.as_array()) {
+                    for f in arr.iter().take(40) {
+                        let key = f.get("key").and_then(|x| x.as_str()).unwrap_or("?");
+                        let count = f.get("count").and_then(|x| x.as_u64()).unwrap_or(0);
+                        lines.push(format!("{key}:{count}"));
+                    }
+                }
+            } else if let Some(arr) = v.get("documents").and_then(|x| x.as_array()) {
+                for d in arr.iter().take(20) {
+                    let num = d.get("document_number").and_then(|x| x.as_str()).unwrap_or("?");
+                    let kind = d.get("doc_type").and_then(|x| x.as_str()).unwrap_or("?");
+                    let date = d.get("publication_date").and_then(|x| x.as_str()).unwrap_or("?");
+                    let close = d.get("comments_close_on").and_then(|x| x.as_str()).unwrap_or("-");
+                    let title: String = d
+                        .get("title")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .chars()
+                        .take(52)
+                        .collect();
+                    lines.push(format!("{num}|{kind}|{date}|comments_close:{close}|{title}"));
+                }
+            }
+            format!(
+                "\"mode\":\"{mode}\",\"total_available\":{total},\"_schema\":\".documents[].{{document_number,title,doc_type,agencies,publication_date,effective_on,comments_close_on,docket_ids,cfr_references,text}}\",\"items\":[{}]",
+                lines.iter().map(|l| format!("\"{}\"", l.replace('"', "'"))).collect::<Vec<_>>().join(",")
+            )
+        }
+        "legal_cfr" => {
+            let mode = v.get("mode").and_then(|x| x.as_str()).unwrap_or("text");
+            let citation = v.get("citation").and_then(|x| x.as_str()).unwrap_or("?");
+            let as_of = v.get("as_of").and_then(|x| x.as_str()).unwrap_or("?");
+            let extra = match mode {
+                "history" => {
+                    let n = v.get("amendments").and_then(|x| x.as_array()).map(|a| a.len()).unwrap_or(0);
+                    // One date, many amended sections — the summary wants the
+                    // distinct dates, not one line per section.
+                    let mut dates: Vec<String> = v
+                        .get("amendments")
+                        .and_then(|x| x.as_array())
+                        .map(|a| {
+                            a.iter()
+                                .filter(|x| x.get("substantive").and_then(|s| s.as_bool()).unwrap_or(true))
+                                .filter_map(|x| x.get("date").and_then(|d| d.as_str()).map(str::to_string))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    dates.dedup();
+                    dates.truncate(12);
+                    format!(
+                        "\"amendments\":{n},\"recent_substantive_dates\":[{}]",
+                        dates.iter().map(|d| format!("\"{d}\"")).collect::<Vec<_>>().join(",")
+                    )
+                }
+                "diff" => {
+                    let d = v.get("diff");
+                    format!(
+                        "\"changed\":{},\"lines_added\":{},\"lines_removed\":{}",
+                        d.and_then(|x| x.get("changed")).and_then(|x| x.as_bool()).unwrap_or(false),
+                        d.and_then(|x| x.get("lines_added")).and_then(|x| x.as_u64()).unwrap_or(0),
+                        d.and_then(|x| x.get("lines_removed")).and_then(|x| x.as_u64()).unwrap_or(0)
+                    )
+                }
+                _ => format!(
+                    "\"chars\":{}",
+                    v.get("chars").and_then(|x| x.as_u64()).unwrap_or(0)
+                ),
+            };
+            format!(
+                "\"mode\":\"{mode}\",\"citation\":\"{citation}\",\"as_of\":\"{as_of}\",{extra},\"_schema\":\".{{text,amendments[],diff,results[]}}\""
+            )
+        }
         _ => {
             // No custom summary for this tool — data is in the file, read it.
             format!("\"_note\":\"no compact summary for {tool}; the full structured result is in this response\"")
@@ -2409,6 +2603,335 @@ fn mcp_build_cli_args(tool: &str, args: &serde_json::Value) -> anyhow::Result<Ve
             }
             Ok(v)
         }
+        // ── legal ──────────────────────────────────────────────────────────
+        "legal_search" => {
+            let mut v = vec![s("legal"), s("search")];
+            let q = args
+                .get("q")
+                .or_else(|| args.get("query"))
+                .and_then(|x| x.as_str())
+                .ok_or_else(|| anyhow::anyhow!("q required"))?;
+            v.extend([s("--q"), s(q)]);
+            for (json_key, flag) in [
+                ("kind", "--kind"),
+                ("court", "--court"),
+                ("after", "--after"),
+                ("before", "--before"),
+                ("judge", "--judge"),
+                ("status", "--status"),
+                ("order", "--order"),
+            ] {
+                if let Some(val) = args.get(json_key).and_then(|x| x.as_str()) {
+                    v.extend([s(flag), s(val)]);
+                }
+            }
+            if let Some(n) = args.get("cited_gt").and_then(|x| x.as_u64()) {
+                v.extend([s("--cited-gt"), n.to_string()]);
+            }
+            if let Some(n) = args.get("limit").and_then(|x| x.as_u64()) {
+                v.extend([s("--limit"), n.to_string()]);
+            }
+            Ok(v)
+        }
+        "legal_opinion" => {
+            let mut v = vec![s("legal"), s("opinion")];
+            if let Some(n) = args.get("id").and_then(|x| x.as_u64()) {
+                v.extend([s("--id"), n.to_string()]);
+            }
+            if let Some(c) = args.get("cite").and_then(|x| x.as_str()) {
+                v.extend([s("--cite"), s(c)]);
+            }
+            if v.len() <= 2 {
+                anyhow::bail!("either id or cite required");
+            }
+            if let Some(n) = args.get("max_chars").and_then(|x| x.as_u64()) {
+                v.extend([s("--max-chars"), n.to_string()]);
+            }
+            Ok(v)
+        }
+        "legal_docket" => {
+            let mut v = vec![s("legal"), s("docket")];
+            for (json_key, flag) in [("court", "--court"), ("number", "--number"), ("q", "--q")] {
+                if let Some(val) = args.get(json_key).and_then(|x| x.as_str()) {
+                    v.extend([s(flag), s(val)]);
+                }
+            }
+            if let Some(n) = args.get("id").and_then(|x| x.as_u64()) {
+                v.extend([s("--id"), n.to_string()]);
+            }
+            if v.len() <= 2 {
+                anyhow::bail!("legal_docket needs id, or number (with court), or q");
+            }
+            for (json_key, flag) in [("limit", "--limit"), ("offset", "--offset")] {
+                if let Some(n) = args.get(json_key).and_then(|x| x.as_u64()) {
+                    v.extend([s(flag), n.to_string()]);
+                }
+            }
+            if args.get("entries").and_then(|x| x.as_bool()) == Some(false) {
+                v.push(s("--no-entries"));
+            }
+            Ok(v)
+        }
+        "legal_cite" => {
+            let mut v = vec![s("legal"), s("cite")];
+            for (json_key, flag) in [("text", "--text"), ("cite", "--cite")] {
+                if let Some(val) = args.get(json_key).and_then(|x| x.as_str()) {
+                    v.extend([s(flag), s(val)]);
+                }
+            }
+            if let Some(n) = args.get("id").and_then(|x| x.as_u64()) {
+                v.extend([s("--id"), n.to_string()]);
+            }
+            if v.len() <= 2 {
+                anyhow::bail!("legal_cite needs text, cite, or id");
+            }
+            if args.get("cited_by").and_then(|x| x.as_bool()) == Some(true) {
+                v.push(s("--cited-by"));
+            }
+            if args.get("authorities").and_then(|x| x.as_bool()) == Some(true) {
+                v.push(s("--authorities"));
+            }
+            if let Some(n) = args.get("limit").and_then(|x| x.as_u64()) {
+                v.extend([s("--limit"), n.to_string()]);
+            }
+            Ok(v)
+        }
+        "legal_cfr" => {
+            let mut v = vec![s("legal"), s("cfr")];
+            if let Some(n) = args.get("title").and_then(|x| x.as_u64()) {
+                v.extend([s("--title"), n.to_string()]);
+            }
+            for (json_key, flag) in [
+                ("part", "--part"),
+                ("section", "--section"),
+                ("subpart", "--subpart"),
+                ("date", "--date"),
+                ("q", "--q"),
+                ("diff_date", "--diff-date"),
+            ] {
+                if let Some(val) = args.get(json_key).and_then(|x| x.as_str()) {
+                    v.extend([s(flag), s(val)]);
+                }
+            }
+            if v.len() <= 2 {
+                anyhow::bail!("legal_cfr needs title (with part/section) or q");
+            }
+            if args.get("history").and_then(|x| x.as_bool()) == Some(true) {
+                v.push(s("--history"));
+            }
+            if args.get("structure").and_then(|x| x.as_bool()) == Some(true) {
+                v.push(s("--structure"));
+            }
+            if let Some(n) = args.get("max_chars").and_then(|x| x.as_u64()) {
+                v.extend([s("--max-chars"), n.to_string()]);
+            }
+            Ok(v)
+        }
+        "legal_fedreg" => {
+            let mut v = vec![s("legal"), s("fedreg")];
+            for (json_key, flag) in [
+                ("q", "--q"),
+                ("kind", "--kind"),
+                ("agency", "--agency"),
+                ("after", "--after"),
+                ("before", "--before"),
+                ("docket", "--docket"),
+                ("cfr_part", "--cfr-part"),
+                ("doc", "--doc"),
+                ("facet", "--facet"),
+            ] {
+                if let Some(val) = args.get(json_key).and_then(|x| x.as_str()) {
+                    v.extend([s(flag), s(val)]);
+                }
+            }
+            if let Some(n) = args.get("cfr_title").and_then(|x| x.as_u64()) {
+                v.extend([s("--cfr-title"), n.to_string()]);
+            }
+            if args.get("text").and_then(|x| x.as_bool()) == Some(true) {
+                v.push(s("--text"));
+            }
+            if args.get("inspection").and_then(|x| x.as_bool()) == Some(true) {
+                v.push(s("--inspection"));
+            }
+            for (json_key, flag) in [("limit", "--limit"), ("max_chars", "--max-chars")] {
+                if let Some(n) = args.get(json_key).and_then(|x| x.as_u64()) {
+                    v.extend([s(flag), n.to_string()]);
+                }
+            }
+            if v.len() <= 2 {
+                anyhow::bail!("legal_fedreg needs at least one of q, agency, doc, docket, or inspection");
+            }
+            Ok(v)
+        }
+        "legal_comments" => {
+            let mut v = vec![s("legal"), s("comments")];
+            for (json_key, flag) in [
+                ("docket", "--docket"),
+                ("q", "--q"),
+                ("agency", "--agency"),
+                ("after", "--after"),
+                ("id", "--id"),
+            ] {
+                if let Some(val) = args.get(json_key).and_then(|x| x.as_str()) {
+                    v.extend([s(flag), s(val)]);
+                }
+            }
+            if v.len() <= 2 {
+                anyhow::bail!("legal_comments needs docket, q, or id");
+            }
+            if args.get("text").and_then(|x| x.as_bool()) == Some(true) {
+                v.push(s("--text"));
+            }
+            if let Some(n) = args.get("limit").and_then(|x| x.as_u64()) {
+                v.extend([s("--limit"), n.to_string()]);
+            }
+            Ok(v)
+        }
+        "legal_enforcement" => {
+            let mut v = vec![s("legal"), s("enforcement")];
+            for (json_key, flag) in [("source", "--source"), ("q", "--q"), ("after", "--after")] {
+                if let Some(val) = args.get(json_key).and_then(|x| x.as_str()) {
+                    v.extend([s(flag), s(val)]);
+                }
+            }
+            if let Some(n) = args.get("limit").and_then(|x| x.as_u64()) {
+                v.extend([s("--limit"), n.to_string()]);
+            }
+            Ok(v)
+        }
+        "legal_statute" => {
+            let mut v = vec![s("legal"), s("statute")];
+            for (json_key, flag) in [("state", "--state"), ("chapter", "--chapter")] {
+                if let Some(val) = args.get(json_key).and_then(|x| x.as_str()) {
+                    v.extend([s(flag), s(val)]);
+                }
+            }
+            if let Some(n) = args.get("title").and_then(|x| x.as_u64()) {
+                v.extend([s("--title"), n.to_string()]);
+            }
+            for (json_key, flag) in [("section", "--section"), ("bill", "--bill")] {
+                if let Some(val) = args.get(json_key).and_then(|x| x.as_str()) {
+                    v.extend([s(flag), s(val)]);
+                }
+            }
+            if let Some(n) = args.get("congress").and_then(|x| x.as_u64()) {
+                v.extend([s("--congress"), n.to_string()]);
+            }
+            if v.len() <= 2 {
+                anyhow::bail!("legal_statute needs title (with section), bill, or state (with section)");
+            }
+            if let Some(n) = args.get("max_chars").and_then(|x| x.as_u64()) {
+                v.extend([s("--max-chars"), n.to_string()]);
+            }
+            Ok(v)
+        }
+        "legal_state_record" => {
+            let mut v = vec![s("legal"), s("record")];
+            let state = args
+                .get("state")
+                .and_then(|x| x.as_str())
+                .ok_or_else(|| anyhow::anyhow!("state required"))?;
+            v.extend([s("--state"), s(state)]);
+            for (json_key, flag) in [
+                ("county", "--county"),
+                ("case_type", "--case-type"),
+                ("case_no", "--case-no"),
+                ("after", "--after"),
+                ("before", "--before"),
+            ] {
+                if let Some(val) = args.get(json_key).and_then(|x| x.as_str()) {
+                    v.extend([s(flag), s(val)]);
+                }
+            }
+            if args.get("include_dob").and_then(|x| x.as_bool()) == Some(true) {
+                v.push(s("--include-dob"));
+            }
+            if let Some(n) = args.get("limit").and_then(|x| x.as_u64()) {
+                v.extend([s("--limit"), n.to_string()]);
+            }
+            Ok(v)
+        }
+        "legal_state_opinions" => {
+            let mut v = vec![s("legal"), s("opinions")];
+            let state = args
+                .get("state")
+                .and_then(|x| x.as_str())
+                .ok_or_else(|| anyhow::anyhow!("state required"))?;
+            v.extend([s("--state"), s(state)]);
+            if let Some(q) = args.get("q").and_then(|x| x.as_str()) {
+                v.extend([s("--q"), s(q)]);
+            }
+            if args.get("unpublished").and_then(|x| x.as_bool()) == Some(true) {
+                v.push(s("--unpublished"));
+            }
+            if let Some(n) = args.get("limit").and_then(|x| x.as_u64()) {
+                v.extend([s("--limit"), n.to_string()]);
+            }
+            Ok(v)
+        }
+        "legal_deadlines" => {
+            let mut v = vec![s("legal"), s("deadlines")];
+            let injury = args
+                .get("injury_date")
+                .and_then(|x| x.as_str())
+                .ok_or_else(|| anyhow::anyhow!("injury_date required"))?;
+            v.extend([s("--injury-date"), s(injury)]);
+            for (json_key, flag) in [
+                ("state", "--state"),
+                ("mechanism", "--mechanism"),
+                ("filing_date", "--filing-date"),
+                ("service_date", "--service-date"),
+            ] {
+                if let Some(val) = args.get(json_key).and_then(|x| x.as_str()) {
+                    v.extend([s(flag), s(val)]);
+                }
+            }
+            if args.get("public_entity").and_then(|x| x.as_bool()) == Some(true) {
+                v.push(s("--public-entity"));
+            }
+            if args.get("professional_defendant").and_then(|x| x.as_bool()) == Some(true) {
+                v.push(s("--professional-defendant"));
+            }
+            Ok(v)
+        }
+        "legal_caps" => {
+            let mut v = vec![s("legal"), s("caps")];
+            let accrual = args
+                .get("accrual_date")
+                .and_then(|x| x.as_str())
+                .ok_or_else(|| anyhow::anyhow!("accrual_date required"))?;
+            v.extend([s("--accrual-date"), s(accrual)]);
+            for (json_key, flag) in [
+                ("state", "--state"),
+                ("claim_type", "--claim-type"),
+                ("filing_date", "--filing-date"),
+            ] {
+                if let Some(val) = args.get(json_key).and_then(|x| x.as_str()) {
+                    v.extend([s(flag), s(val)]);
+                }
+            }
+            Ok(v)
+        }
+        "legal_entity" => {
+            let mut v = vec![s("legal"), s("entity")];
+            for (json_key, flag) in [
+                ("state", "--state"),
+                ("name", "--name"),
+                ("id", "--id"),
+                ("status", "--status"),
+            ] {
+                if let Some(val) = args.get(json_key).and_then(|x| x.as_str()) {
+                    v.extend([s(flag), s(val)]);
+                }
+            }
+            if !v.iter().any(|a| a == "--name" || a == "--id") {
+                anyhow::bail!("legal_entity needs name or id");
+            }
+            if let Some(n) = args.get("limit").and_then(|x| x.as_u64()) {
+                v.extend([s("--limit"), n.to_string()]);
+            }
+            Ok(v)
+        }
         _ => Err(anyhow::anyhow!("Unknown tool: {tool}")),
     }
 }
@@ -3093,5 +3616,88 @@ mod mcp_tool_tests {
         });
         let raw = serde_json::to_string(&input).unwrap();
         assert!(mcp_strip_metadata(&raw).is_none());
+    }
+
+    /// Every advertised tool must map to CLI args. Catches the failure where a
+    /// catalog entry is added (or an arg renamed) without the dispatch arm to
+    /// back it — which a client only discovers as "Unknown tool" mid-task.
+    #[test]
+    fn every_advertised_legal_tool_dispatches() {
+        let catalog: Vec<serde_json::Value> =
+            serde_json::from_str(include_str!("legal_tools.json")).expect("legal catalog parses");
+        assert_eq!(catalog.len(), 14, "catalog size changed — update the samples below");
+
+        // One minimally-valid argument set per tool, chosen to satisfy each
+        // tool's required-argument check.
+        let samples = [
+            ("legal_cite", serde_json::json!({"cite": "597 U.S. 1"})),
+            ("legal_cfr", serde_json::json!({"title": 17, "section": "240.10b5-1"})),
+            ("legal_fedreg", serde_json::json!({"q": "tariff"})),
+            ("legal_search", serde_json::json!({"q": "qualified immunity"})),
+            ("legal_docket", serde_json::json!({"court": "nysd", "number": "1:22-cr-00673"})),
+            ("legal_opinion", serde_json::json!({"cite": "597 U.S. 1"})),
+            ("legal_comments", serde_json::json!({"docket": "SEC-2026-5190"})),
+            ("legal_enforcement", serde_json::json!({"source": "doj"})),
+            ("legal_statute", serde_json::json!({"title": 15, "section": "78j"})),
+            ("legal_state_record", serde_json::json!({"state": "wi", "county": "Milwaukee"})),
+            ("legal_state_opinions", serde_json::json!({"state": "il"})),
+            ("legal_deadlines", serde_json::json!({"injury_date": "2024-03-15", "mechanism": "motor_vehicle"})),
+            ("legal_caps", serde_json::json!({"accrual_date": "2024-06-01", "filing_date": "2025-07-01"})),
+            ("legal_entity", serde_json::json!({"state": "co", "name": "STATE FARM"})),
+        ];
+
+        for tool in &catalog {
+            let name = tool.get("name").and_then(|n| n.as_str()).expect("tool has a name");
+            assert!(
+                tool.get("description").and_then(|d| d.as_str()).is_some_and(|d| d.len() > 200),
+                "{name} needs a description that tells the model when to reach for it"
+            );
+            let (_, args) = samples
+                .iter()
+                .find(|(n, _)| *n == name)
+                .unwrap_or_else(|| panic!("no sample args for advertised tool {name}"));
+            let built = mcp_build_cli_args(name, args)
+                .unwrap_or_else(|e| panic!("{name} failed to build CLI args: {e}"));
+            assert_eq!(built[0], "legal", "{name} must dispatch to the legal subcommand");
+        }
+    }
+
+    /// The required-argument checks must actually fire — a tool that silently
+    /// accepts an empty call wastes a round trip and returns a confusing error
+    /// from the CLI layer instead of a usable one from the MCP layer.
+    #[test]
+    fn legal_tools_reject_empty_arguments() {
+        let empty = serde_json::json!({});
+        for tool in [
+            "legal_entity",
+            "legal_cite",
+            "legal_cfr",
+            "legal_search",
+            "legal_docket",
+            "legal_opinion",
+            "legal_comments",
+            "legal_statute",
+        ] {
+            assert!(
+                mcp_build_cli_args(tool, &empty).is_err(),
+                "{tool} should reject an empty argument set"
+            );
+        }
+    }
+
+    /// The profile switch is what makes one binary two products; if it stops
+    /// filtering, a legal-search user gets 21 markets tools they did not ask for.
+    #[test]
+    fn profile_filters_the_catalog() {
+        let all = mcp_catalog().len();
+        std::env::set_var("ELI_MCP_PROFILE", "legal");
+        let legal = mcp_catalog();
+        std::env::set_var("ELI_MCP_PROFILE", "finance");
+        let finance = mcp_catalog();
+        std::env::remove_var("ELI_MCP_PROFILE");
+
+        assert!(legal.iter().all(|t| t["name"].as_str().is_some_and(|n| n.starts_with("legal_"))));
+        assert!(finance.iter().all(|t| t["name"].as_str().is_some_and(|n| n.starts_with("finance_"))));
+        assert_eq!(all, legal.len() + finance.len());
     }
 }

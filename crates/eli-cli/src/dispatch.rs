@@ -25,7 +25,13 @@ pub async fn run() -> Result<()> {
         Some(Command::ToolInfo { path }) => cmd_tool_info(path),
         Some(Command::Finance { cmd }) => cmd_finance(cmd).await,
         Some(Command::Web { cmd }) => cmd_web(cmd).await,
+        Some(Command::Legal { cmd }) => cmd_legal(cmd).await,
         Some(Command::Mcp(args)) => {
+            // An explicit --profile wins; otherwise whatever the binary set at
+            // startup (legal-search => legal) stands.
+            if let Some(profile) = args.profile.as_deref() {
+                std::env::set_var("ELI_MCP_PROFILE", profile.trim().to_ascii_lowercase());
+            }
             if let Some(McpSubcommand::Share(share_args)) = args.cmd {
                 cmd_mcp_share(share_args).await
             } else if args.http {
@@ -66,5 +72,24 @@ async fn cmd_finance(cmd: FinanceCommand) -> Result<()> {
         FinanceCommand::Bis(args) => cmd_finance_bis(args).await,
         FinanceCommand::Boj(args) => cmd_finance_boj(args).await,
         FinanceCommand::Boe(args) => cmd_finance_boe(args).await,
+    }
+}
+
+async fn cmd_legal(cmd: LegalCommand) -> Result<()> {
+    match cmd {
+        LegalCommand::Search(args) => cmd_legal_search(args).await,
+        LegalCommand::Opinion(args) => cmd_legal_opinion(args).await,
+        LegalCommand::Docket(args) => cmd_legal_docket(args).await,
+        LegalCommand::Cite(args) => cmd_legal_cite(args).await,
+        LegalCommand::Cfr(args) => cmd_legal_cfr(args).await,
+        LegalCommand::Fedreg(args) => cmd_legal_fedreg(args).await,
+        LegalCommand::Comments(args) => cmd_legal_comments(args).await,
+        LegalCommand::Enforcement(args) => cmd_legal_enforcement(args).await,
+        LegalCommand::Statute(args) => cmd_legal_statute(args).await,
+        LegalCommand::Record(args) => cmd_legal_record(args).await,
+        LegalCommand::Opinions(args) => cmd_legal_opinions(args).await,
+        LegalCommand::Deadlines(args) => cmd_legal_deadlines(args).await,
+        LegalCommand::Caps(args) => cmd_legal_caps(args).await,
+        LegalCommand::Entity(args) => cmd_legal_entity(args).await,
     }
 }
