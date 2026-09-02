@@ -109,6 +109,43 @@ pub(super) async fn fetch(req: DeadlinesRequest) -> Result<DeadlinesResponse> {
         });
     }
 
+    // ── the limitations period against a public entity ────────────────────
+    //
+    // A public-entity defendant does not merely ADD a notice requirement, it
+    // may change the limitations period itself: 13-80-102(1)(h) puts "all
+    // actions against any public or governmental entity" in the two-year
+    // bucket, "except as otherwise provided". Whether the three-year
+    // motor-vehicle period at 13-80-101(1)(n)(I) is such an exception is
+    // genuinely contested. Handing back a confident three-year date here is how
+    // a claim dies a year early, so the conflict is surfaced rather than
+    // resolved.
+    if req.public_entity {
+        out.deadlines.push(Deadline {
+            name: "Statute of limitations — action against a public entity (CONFLICT: calendar the earlier date)"
+                .into(),
+            citation: "C.R.S. 13-80-102(1)(h)".into(),
+            date: add_years(injury, 2).map(|d| d.to_string()),
+            runs_from: "accrual".into(),
+            period: "2 years".into(),
+            fatal: true,
+            note: Some(
+                "13-80-102(1)(h) covers all actions against a public or governmental entity or its \
+                 employees, 'except as otherwise provided'. Against a public entity this two-year \
+                 date may govern even where the injury is motor-vehicle, and the interaction with \
+                 the three-year period at 13-80-101(1)(n)(I) is contested. The conservative course \
+                 is to treat THIS as the operative deadline and file before it; nothing is lost by \
+                 filing early and the claim is lost by filing late."
+                    .into(),
+            ),
+        });
+        out.judgment_calls.push(
+            "Which limitations period governs a motor-vehicle claim against a public entity — the \
+             two years at 13-80-102(1)(h) or the three at 13-80-101(1)(n)(I) — is a real legal \
+             question this tool does not resolve. Research it; do not rely on the longer date."
+                .to_string(),
+        );
+    }
+
     // ── governmental immunity notice ──────────────────────────────────────
     if req.public_entity {
         out.deadlines.push(Deadline {
@@ -281,6 +318,22 @@ mod tests {
         assert_eq!(n.date.as_deref(), Some("2024-09-13"));
         assert!(n.fatal);
         assert!(n.note.as_ref().is_some_and(|s| s.contains("JURISDICTIONAL")));
+    }
+
+    /// The defect a head-to-head test exposed: against RTD the tool returned a
+    /// confident three-year date, when 13-80-102(1)(h) may put the action in
+    /// the two-year bucket. A year of false comfort kills the claim.
+    #[tokio::test]
+    async fn public_entity_surfaces_the_limitations_conflict() {
+        let r = fetch(req("motor_vehicle", true)).await.expect("ok");
+        let c = find(&r, "public entity (CONFLICT");
+        assert_eq!(c.date.as_deref(), Some("2026-03-15"));
+        assert!(c.fatal);
+        assert!(c.citation.contains("13-80-102(1)(h)"));
+        assert!(
+            r.judgment_calls.iter().any(|j| j.contains("does not resolve")),
+            "the conflict must be named as unresolved, not silently picked"
+        );
     }
 
     /// Not flagging a public entity must produce a prompt, not silence.

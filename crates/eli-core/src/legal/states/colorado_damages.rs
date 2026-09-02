@@ -26,6 +26,11 @@ use crate::{Error, Result};
 use chrono::NaiveDate;
 
 const CERT_URL: &str = "https://www.sos.state.co.us/pubs/info_center/files/damages_new.pdf";
+/// The Governmental Immunity Act ceiling is certified separately, on its own
+/// four-year cycle, in its own document. Same architecture as the noneconomic
+/// cap — base figure in the statute, operative figure in a certificate.
+const CGIA_CERT_URL: &str =
+    "https://www.sos.state.co.us/pubs/info_center/files/LimitationsOnJudgments.pdf";
 const CERT_REVISED: &str = "2026-01-27";
 /// Indexing resumes on this date under HB 24-1472; past it, this table is
 /// guaranteed stale and the tool says so instead of guessing.
@@ -93,6 +98,17 @@ const BANDS: &[Band] = &[
     },
 ];
 
+/// C.R.S. 24-10-114 ceilings, from the SOS "Limitations on Judgments"
+/// certificate. These are a HARD CEILING on everything recoverable from a
+/// public entity — not a noneconomic sub-limit — so against RTD, the City, or
+/// Denver Health this number governs and 13-21-102.5 is irrelevant.
+/// Bands are [from, until) by accrual date.
+const CGIA_BANDS: &[(&str, Option<&str>, i64, i64)] = &[
+    ("2018-01-01", Some("2022-01-01"), 387_000, 1_093_000),
+    ("2022-01-01", Some("2026-01-01"), 424_000, 1_195_000),
+    ("2026-01-01", Some("2030-01-01"), 505_000, 1_421_000),
+];
+
 /// Post-2025 figures come from the statute, not the certificate.
 const STATUTORY_NONECONOMIC_2025: i64 = 1_500_000;
 /// Solatium is fixed from 2024 on — the certificate says so in terms.
@@ -130,6 +146,7 @@ pub(super) async fn fetch(req: DamagesCapRequest) -> Result<DamagesCapResponse> 
         "wrongful_death" | "wd" => vec!["wrongful_death"],
         "solatium" => vec!["solatium"],
         "dram_shop" | "dramshop" => vec!["dram_shop"],
+        "cgia" | "public_entity" | "government" => vec!["cgia"],
         "medmal" | "medical_malpractice" => {
             // Medical malpractice is carved out of 13-21-102.5 entirely and
             // capped under 13-64-302 on a different schedule keyed to the acts
@@ -182,6 +199,15 @@ pub(super) async fn fetch(req: DamagesCapRequest) -> Result<DamagesCapResponse> 
         out.warnings.push(format!(
             "inflation indexing resumed {NEXT_ADJUSTMENT} and this table was transcribed from the \
              certificate revised {CERT_REVISED} — re-read {CERT_URL} before relying on these figures."
+        ));
+    }
+    if out.caps.iter().any(|c| c.claim_type != "cgia") {
+        out.warnings.push(format!(
+            "IF ANY DEFENDANT IS A PUBLIC ENTITY — RTD, a city or county, Denver Health, a school \
+             district, the state — the C.R.S. 24-10-114 ceiling governs instead of anything above, \
+             and it is far lower: a hard cap on TOTAL recovery from that defendant, not a \
+             noneconomic sub-limit. Re-run with claim_type=cgia. Certified separately at \
+             {CGIA_CERT_URL}."
         ));
     }
     out.warnings.push(format!(
@@ -295,6 +321,29 @@ fn resolve(
                     source_url: Some(CERT_URL.into()),
                 },
                 None => unresolved("solatium", "C.R.S. 13-21-203.5", warnings),
+            }
+        }
+        "cgia" => {
+            match CGIA_BANDS.iter().find(|(from, until, _, _)| {
+                accrual >= date(from) && until.map(|u| accrual < date(u)).unwrap_or(true)
+            }) {
+                Some((from, until, per_person, per_occurrence)) => DamagesCap {
+                    claim_type: "cgia".into(),
+                    citation: "C.R.S. 24-10-114(1) as adjusted".into(),
+                    amount: Some(*per_person),
+                    // Not a court-raised maximum — this is the multi-claimant
+                    // ceiling for the whole occurrence, and no single person may
+                    // exceed the per-person figure out of it.
+                    increased_maximum: Some(*per_occurrence),
+                    basis: format!(
+                        "accrual band {from} to {}; per-person ceiling, with the second figure the \
+                         cap for an occurrence injuring two or more people",
+                        until.unwrap_or("open")
+                    ),
+                    source: "SOS Limitations on Judgments certificate".into(),
+                    source_url: Some(CGIA_CERT_URL.into()),
+                },
+                None => unresolved("cgia", "C.R.S. 24-10-114(1)", warnings),
             }
         }
         "dram_shop" => match band.and_then(|b| b.dram_shop.map(|v| (b, v))) {
@@ -422,6 +471,37 @@ mod tests {
     async fn post_2025_wrongful_death_declines_rather_than_guessing() {
         let c = one("2025-06-01", None, "wrongful_death").await;
         assert_eq!(c.amount, None, "must not invent a post-amendment figure");
+    }
+
+    /// The defect this fixes: a 2026 crash with RTD as defendant returned
+    /// $1.5M, three times the real $505,000 ceiling, with nothing pointing at
+    /// the governing statute.
+    #[tokio::test]
+    async fn cgia_ceiling_applies_to_public_entity_defendants() {
+        let c = one("2026-04-10", None, "cgia").await;
+        assert_eq!(c.amount, Some(505_000));
+        assert_eq!(c.increased_maximum, Some(1_421_000));
+        assert!(c.citation.contains("24-10-114"));
+    }
+
+    #[tokio::test]
+    async fn cgia_bands_step_by_accrual_date() {
+        assert_eq!(one("2025-12-31", None, "cgia").await.amount, Some(424_000));
+        assert_eq!(one("2026-01-01", None, "cgia").await.amount, Some(505_000));
+        assert_eq!(one("2021-06-01", None, "cgia").await.amount, Some(387_000));
+    }
+
+    /// Not knowing to ask is the actual failure mode, so every non-CGIA answer
+    /// has to raise the possibility itself.
+    #[tokio::test]
+    async fn a_noneconomic_answer_warns_about_the_public_entity_ceiling() {
+        let r = fetch(req("2026-04-10", None, "noneconomic")).await.expect("ok");
+        assert_eq!(r.caps[0].amount, Some(1_500_000));
+        assert!(
+            r.warnings.iter().any(|w| w.contains("24-10-114") && w.contains("RTD")),
+            "must flag the CGIA ceiling: {:?}",
+            r.warnings
+        );
     }
 
     #[tokio::test]
